@@ -17,6 +17,15 @@ join_damage_cost_factors <- function(assets_with_hazards, hazard_configs, hazard
     stop("hazards_dir does not exist: ", hazards_dir)
   }
 
+  # Global mode (and TRISK-PRISK, which always uses the Global flood config)
+  # uses country/region-aware factor files with a different shape than
+  # Brazil's single flat damage_and_cost_factors.csv, so it's joined by a
+  # completely separate function. Brazil mode (hazards_dir basename "config")
+  # is untouched below.
+  if (identical(basename(hazards_dir), "config_global")) {
+    return(join_global_damage_cost_factors(assets_with_hazards, hazard_configs, hazards_dir))
+  }
+
   mappings_dir <- file.path(dirname(hazards_dir), "mappings")
   if (!dir.exists(mappings_dir)) {
     stop("hazards mappings directory does not exist: ", mappings_dir)

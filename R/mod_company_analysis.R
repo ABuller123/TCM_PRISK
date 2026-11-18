@@ -302,7 +302,7 @@ mod_company_analysis_server <- function(id, results_reactive,
           } else if (grepl("^pd_|_pd$", col, ignore.case = TRUE)) {
             companies_display[[col]] <- paste0(sprintf("%.4f", companies_display[[col]] * 100), "%")
           } else if (grepl("npv|loss", col, ignore.case = TRUE)) {
-            companies_display[[col]] <- paste0("R$", format(round(companies_display[[col]]), big.mark = ","))
+            companies_display[[col]] <- paste0("$", format(round(companies_display[[col]]), big.mark = ","))
           }
         }
       }
@@ -529,9 +529,9 @@ create_portfolio_summary_plot <- function(summary_data,
     hover_text <- mapply(function(metric, med, p10, p90, pct_row) {
       base <- paste0(
         "<b>", metric, "</b><br>",
-        "Median EL: R$", formatC(round(med), format="f", digits=0, big.mark=","), "<br>",
-        "P10: R$", formatC(round(p10), format="f", digits=0, big.mark=","),
-        " | P90: R$", formatC(round(p90), format="f", digits=0, big.mark=",")
+        "Median EL: $", formatC(round(med), format="f", digits=0, big.mark=","), "<br>",
+        "P10: $", formatC(round(p10), format="f", digits=0, big.mark=","),
+        " | P90: $", formatC(round(p90), format="f", digits=0, big.mark=",")
       )
       if (metric == "Difference") {
         pct_med <- summary_data$pct_change[summary_data$metric == "Difference"]
@@ -569,7 +569,7 @@ create_portfolio_summary_plot <- function(summary_data,
           categoryarray = metrics_order
         ),
         yaxis = list(
-          title = "Total Expected Loss (R$)",
+          title = "Total Expected Loss ($)",
           showgrid = TRUE,
           gridcolor = "#DDE5EC"
         ),
@@ -590,7 +590,7 @@ create_portfolio_summary_plot <- function(summary_data,
     row <- summary_data[i, ]
     base_text <- paste0(
       "<b>", row$metric, "</b><br>",
-      "Total Expected Loss: R$", format(round(row$value), big.mark = ",")
+      "Total Expected Loss: $", format(round(row$value), big.mark = ",")
     )
     if (row$metric == "Difference" && !is.na(row$pct_change)) {
       base_text <- paste0(base_text, "<br>% Change: ", sprintf("%.2f", row$pct_change), "%")
@@ -613,7 +613,7 @@ create_portfolio_summary_plot <- function(summary_data,
         categoryarray = c("Baseline", "Shock", "Difference")
       ),
       yaxis = list(
-        title = "Total Expected Loss (R$)",
+        title = "Total Expected Loss ($)",
         showgrid = TRUE,
         gridcolor = "#DDE5EC"
       ),
@@ -716,8 +716,8 @@ create_fi_expected_loss_plot <- function(companies_df,
   } else {
     hover_text <- paste0(
       "<b>", fi_median$fi_display, "</b><br>",
-      "EL Baseline: R$", format(round(fi_median$EL_baseline), big.mark = ","), "<br>",
-      "EL Shock: R$",    format(round(fi_median$EL_shock),    big.mark = ","), "<br>",
+      "EL Baseline: $", format(round(fi_median$EL_baseline), big.mark = ","), "<br>",
+      "EL Shock: $",    format(round(fi_median$EL_shock),    big.mark = ","), "<br>",
       "Change: ", sprintf("%.2f", fi_median$EL_change_pct), "%"
     )
 
@@ -768,7 +768,7 @@ build_uncertainty_companies_table <- function(companies_median, companies_p10, c
 
   fmt_pct  <- function(x) sprintf("%.2f%%", x)
   fmt_pd   <- function(x) sprintf("%.4f%%", x * 100)
-  fmt_curr <- function(x) paste0("R$", formatC(round(x), format = "f", digits = 0, big.mark = ","))
+  fmt_curr <- function(x) paste0("$", formatC(round(x), format = "f", digits = 0, big.mark = ","))
 
   result <- companies_median |>
     dplyr::select(dplyr::any_of(c("company", "fi")))

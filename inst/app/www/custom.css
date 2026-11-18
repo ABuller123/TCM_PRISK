@@ -80,33 +80,41 @@ body {
   border-color: rgba(255, 255, 255, 0.5);
 }
 
-.partner-logo {
-  display: block;
-  width: 100%;
-  height: auto;
-  max-width: none;
-  object-fit: contain;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.12));
-}
-
-.app-footer {
-  margin-top: auto;
-  padding: 1.5rem 2rem;
-  background: var(--card-background);
-  border-top: 1px solid var(--border-color);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  flex-shrink: 0;
-}
-
-.app-footer-logos {
+.app-region-toggle,
+.app-mode-toggle {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 1.5rem;
-  flex-wrap: wrap;
-  width: 100%;
+}
+
+.app-region-toggle .shiny-input-container,
+.app-mode-toggle .shiny-input-container {
+  width: auto;
+  margin-bottom: 0;
+}
+
+.app-region-toggle label.control-label,
+.app-mode-toggle label.control-label {
+  color: var(--card-background);
+  margin-right: 0.5rem;
+  margin-bottom: 0;
+  font-weight: 500;
+}
+
+.app-region-toggle .shiny-options-group,
+.app-mode-toggle .shiny-options-group {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0;
+}
+
+.app-region-toggle .radio-inline,
+.app-mode-toggle .radio-inline {
+  color: var(--card-background);
+  background-color: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--border-radius);
+  padding: 0.25rem 0.75rem;
+  margin: 0;
 }
 
 .app-title {
@@ -742,31 +750,15 @@ body {
     min-width: auto;
   }
 
-  .partner-logo {
+  .app-region-toggle,
+  .app-mode-toggle {
     width: 100%;
-    height: auto;
-    max-width: none;
+    justify-content: center;
   }
 
   .app-settings-btn {
     width: 100%;
     justify-content: center;
-  }
-}
-
-@media (min-width: 992px) {
-  .partner-logo {
-    width: 100%;
-    height: auto;
-    max-width: none;
-  }
-
-  .app-footer {
-    padding: 1.5rem 3rem;
-  }
-
-  .app-footer-logos {
-    gap: 1.25rem;
   }
 }
 

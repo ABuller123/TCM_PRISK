@@ -8,7 +8,13 @@ spatial_status_insufficient <- function() {
   "insufficient location data available. Less granular spatial separation necessary"
 }
 
-parse_spatial_values <- function(x) {
+# Delimiters for stored region LABELS: labels may legitimately contain commas
+# (e.g. basin names such as "Elbe (with Spree, Vltava)"), so only "|" and ";" split
+# them. Codes never contain commas and keep the permissive "|;," set.
+SPATIAL_LABEL_SPLIT <- "[|;]"
+SPATIAL_CODE_SPLIT <- "[|;,]"
+
+parse_spatial_values <- function(x, split = SPATIAL_CODE_SPLIT) {
   if (is.null(x) || length(x) == 0) {
     return(character(0))
   }
@@ -16,7 +22,7 @@ parse_spatial_values <- function(x) {
   if (is.na(x_chr) || !nzchar(trimws(x_chr))) {
     return(character(0))
   }
-  vals <- unlist(strsplit(x_chr, "[|;,]"))
+  vals <- unlist(strsplit(x_chr, split))
   vals <- trimws(vals)
   vals[nzchar(vals)]
 }
@@ -343,6 +349,23 @@ read_overlap_table <- function(overlaps_dir, source_level, target_level) {
 }
 
 get_spatial_level_choices <- function(scheme) {
+  if (identical(scheme, "global_adm")) {
+    return(c(
+      "Global (whole)" = GLOBAL_WHOLE_AREA_LEVEL,
+      "Countries (ADM0)" = "adm0",
+      "Admin level 1 (ADM1)" = "adm1",
+      "Admin level 2 (ADM2)" = "adm2"
+    ))
+  }
+
+  if (identical(scheme, "global_basins")) {
+    return(c(
+      "Global (whole)" = GLOBAL_WHOLE_AREA_LEVEL,
+      "Basins - level 2 (62 large basins)" = "level2",
+      "Basins - level 4 (1,342 basins)" = "level4"
+    ))
+  }
+
   if (identical(scheme, "hydro_regions")) {
     return(c(
       "Brazil (whole)" = "brazil",
@@ -360,8 +383,18 @@ get_spatial_level_choices <- function(scheme) {
 }
 
 get_spatial_region_choices <- function(spatial_data, scheme, level) {
-  if (is.null(spatial_data) || is.null(level) || level == "brazil") {
+  if (is.null(spatial_data) || is.null(level) || level %in% whole_area_spatial_levels()) {
     return(tibble::tibble(region_code = character(), region_label = character()))
+  }
+
+  if (identical(scheme, "global_basins")) {
+    return(get_global_basin_choices(spatial_data, level) |>
+      dplyr::select("region_code", "region_label"))
+  }
+
+  if (identical(scheme, "global_adm")) {
+    return(get_global_adm_region_choices(spatial_data, level) |>
+      dplyr::select("region_code", "region_label"))
   }
 
   layer <- NULL
@@ -699,11 +732,21 @@ evaluate_event_spatial_selection <- function(asset_rows, scheme, level, selected
       spatial_exposure_status = spatial_status_not_exposed()
     )
 
-  if (level == "brazil" || (length(selected_codes) == 0 && length(selected_labels) == 0)) {
+  if (level %in% whole_area_spatial_levels() || (length(selected_codes) == 0 && length(selected_labels) == 0)) {
     res$spatial_included <- TRUE
     res$spatial_multiplier <- 1
     res$spatial_exposure_status <- NA_character_
     return(res)
+  }
+
+  # Global basins: point-in-polygon on asset coordinates only.
+  if (identical(scheme, "global_basins")) {
+    return(evaluate_global_basin_selection(asset_rows, level, selected_codes, spatial_data, res))
+  }
+
+  # Global administrative regions (Heat): point-in-polygon on asset coordinates only.
+  if (identical(scheme, "global_adm")) {
+    return(evaluate_global_adm_selection(asset_rows, level, selected_codes, spatial_data, res))
   }
 
   # Coordinates path (highest-fidelity location).
@@ -950,7 +993,7 @@ evaluate_spatial_separation <- function(
         raw_scheme <- events_spatial$spatial_scheme[[i]]
         if (is_non_empty_chr(raw_scheme)) {
           scheme <- tolower(as.character(raw_scheme))
-          if (scheme %in% c("adm_regions", "hydro_regions")) {
+          if (scheme %in% c("adm_regions", "hydro_regions", "global_basins", "global_adm")) {
             return(scheme)
           }
         }
@@ -966,13 +1009,17 @@ evaluate_spatial_separation <- function(
     )
   }
 
-  non_brazil <- events_spatial$spatial_level != "brazil"
-  if (any(non_brazil) && is.null(spatial_separation_data)) {
-    spatial_separation_data <- load_spatial_separation_data(
-      base_dir = base_dir,
-      adm1_boundaries = adm1_boundaries,
-      adm2_boundaries = adm2_boundaries
-    )
+  non_whole_area <- !events_spatial$spatial_level %in% whole_area_spatial_levels()
+  if (any(non_whole_area) && is.null(spatial_separation_data)) {
+    if (any(events_spatial$spatial_scheme[non_whole_area] %in% c("global_basins", "global_adm"))) {
+      spatial_separation_data <- load_global_spatial_data(base_dir)
+    } else {
+      spatial_separation_data <- load_spatial_separation_data(
+        base_dir = base_dir,
+        adm1_boundaries = adm1_boundaries,
+        adm2_boundaries = adm2_boundaries
+      )
+    }
   }
 
   fallback_state <- new.env(parent = emptyenv())
@@ -1020,7 +1067,7 @@ evaluate_spatial_separation <- function(
     scheme <- as.character(event_row$spatial_scheme[[1]])
     level <- as.character(event_row$spatial_level[[1]])
     selected_codes <- parse_spatial_values(event_row$spatial_region_codes)
-    selected_labels <- parse_spatial_values(event_row$spatial_region_labels)
+    selected_labels <- parse_spatial_values(event_row$spatial_region_labels, split = SPATIAL_LABEL_SPLIT)
 
     selected_codes <- resolve_selected_region_codes(
       spatial_data = spatial_separation_data,

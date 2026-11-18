@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "climate-risk-tool",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        "-c",
+        "T=/Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/library/terra; unset GDAL_DATA GDAL_DRIVER_PATH; export PROJ_DATA=$T/proj PROJ_LIB=$T/proj; exec Rscript -e \"options(shiny.port=3838, shiny.host='127.0.0.1'); devtools::load_all('.', quiet=TRUE); run_app(base_dir='/Users/2diigermany/Theia Dropbox/Antonio Buller/PortCheck_v2/10_Projects/PRISK_TCM_Data/PRISK Repo/Climate RIsk model Data folder with floods/Climate Risk Model Data_final')\""
+      ],
+      "port": 3838
+    }
+  ]
+}

@@ -141,12 +141,18 @@ mod_profit_pathways_server <- function(id, results_reactive, cnae_exposure_react
             "sector_code"
           ))
         ) |>
+        # Probabilistic results (one row per asset x return period) need not carry
+        # asset_subtype / asset_category: add them as NA instead of failing.
+        (\(df) {
+          if (!"asset_subtype" %in% names(df)) df$asset_subtype <- NA_character_
+          if (!"asset_category" %in% names(df)) df$asset_category <- NA_character_
+          df
+        })() |>
         dplyr::mutate(
           asset_subtype = dplyr::if_else(
-            "asset_category" %in% names(dplyr::cur_data()) &
-              !is.na(.data$asset_category) &
+            !is.na(.data$asset_category) &
               tolower(as.character(.data$asset_category)) == "agriculture",
-            .data$asset_subtype,
+            as.character(.data$asset_subtype),
             NA_character_
           )
         ) |>
@@ -544,7 +550,7 @@ create_profit_plot <- function(data, highlighted_assets, title, log_scale = FALS
         if (nzchar(sector_label)) paste0("Sector: ", sector_label, "<br>") else "",
         share_text,
         "Year: %{x}<br>",
-        "Profit: R$%{customdata:,.2f}%{text}",
+        "Profit: $%{customdata:,.2f}%{text}",
         "<extra></extra>"
       )
     } else {
@@ -554,7 +560,7 @@ create_profit_plot <- function(data, highlighted_assets, title, log_scale = FALS
         if (nzchar(sector_label)) paste0("Sector: ", sector_label, "<br>") else "",
         share_text,
         "Year: %{x}<br>",
-        "Profit: R$%{customdata:,.0f}<br>",
+        "Profit: $%{customdata:,.0f}<br>",
         "<extra></extra>"
       )
     }
@@ -580,7 +586,7 @@ create_profit_plot <- function(data, highlighted_assets, title, log_scale = FALS
 
   # Configure y-axis based on scale type
   yaxis_config <- list(
-    title = if (log_scale) "Profit (R$, log scale)" else "Profit (R$)",
+    title = if (log_scale) "Profit ($, log scale)" else "Profit ($)",
     showgrid = TRUE,
     gridcolor = "#DDE5EC"
   )

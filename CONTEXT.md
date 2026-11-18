@@ -769,6 +769,166 @@ Assets output now includes drought metadata:
   - Columns: `province`, `subtype`, `season`, `damage_factor`, `off_window`
 - Events must include `season` column (Summer/Autumn/Winter/Spring)
 
+### Global Heat (Labour Productivity) -- Global mode only
+
+Brazil's Heat hazard above is untouched. Global mode has its own heat engine, implemented in
+`R/utils__heat_global.R` and activated by `hazards/config_global/Heat.yml` (indicator
+`type: global_heat_maps`; Brazil's `config/Heat.yml` has no such marker).
+
+**Hazard data** (`hazards/indicators/Heat Global/global_hazard_change_maps/`): 28 GeoTIFFs
+`hi35_change_<ssp>_<start>-<end>.tif` (4 SSPs x 7 twenty-year windows), 29 bands each. Only the
+`excess_<median|mean|p10|p90>_RP<2|5|10|25|50|100>` bands are used: days/year with heat index >= 35C
+*above the historical baseline* (negative values are clamped to 0). There is no RP 1000.
+
+**Why not the generic loader**: the generic TIF loader requires single-band files with a
+`metadata.csv`. Heat maps are read lazily at compute time; `load_hazards_and_inventory()` only
+registers inventory rows (one per scenario x return period x statistic, via
+`build_global_heat_inventory()`), no rasters. The inventory's `statistic` column exists only for the UI
+dropdown (median is the default) and is dropped by the compute entry points
+(`drop_heat_ui_inventory_columns()`) so it never leaks into other hazards' output.
+
+**Time blending** (`heat_blend_weights()`): each window represents its centre year ((start+end)/2, e.g.
+2021-2040 -> 2030.5). Years <= the first centre use the first map unchanged; years >= the last centre use the
+last map; otherwise the two bracketing maps are blended linearly,
+`w = (year - earlier centre) / (later centre - earlier centre)`. Blending is done on the per-asset values
+extracted from each window, which equals blending the maps for point assets.
+
+**Impact chain**: asset sector -> NACE code (`Nace_exposure.xlsx`, `resolve_nace_exposure()`: exact code, parent
+levels, sector description, default Medium) -> exposure class Low/Medium/High -> LP loss 4.2% / 11.8% / 20.8%
+(hardcoded, `HEAT_LP_LOSS_BY_EXPOSURE`). `Sector` in Global inputs holds NACE codes; Excel float artefacts
+(`1.1000000000000001`) and standard NACE forms (`01.11`) are normalised by `normalize_nace_code()`.
+
+**Output change (labour-only)**: no full Cobb-Douglas. When only labour is shocked, A, K, E, beta_K and beta_E appear
+identically in baseline and heat-adjusted output and cancel, so
+`s = excess_days / 365 x LP loss`, `output_change_pct = (1 - s)^beta_L - 1` (a fraction; -0.006923 = -0.6923%),
+`revenue_adjustment = baseline_revenue x output_change_pct`. The shock applied is `revenue * (1 + output_change_pct)`
+(= baseline + adjustment). `beta_L` depends on the asset country's IMF group
+(`IMF_classification.xlsx`): **Advanced Economies 0.535, Emerging Market and Developing Economies 0.399**; a country
+that is missing/not in the file defaults to EMDE and is flagged `beta_L_source = "default_EMDE"`. The two values are
+the named constants `beta_L_advanced` / `beta_L_emde` of the revenue equation in `config_global/Heat.yml` (swap them
+there for sensitivity runs). Source: Songur, M. (2019), Ankara Haci Bayram Veli Universitesi Iktisadi ve Idari
+Bilimler Fakultesi Dergisi 21(3), 757-784, Table 5, p. 774 (AMG estimator; labour = employment x Penn World Table
+human capital index).
+
+*Country matching*: the IMF file has names only. ISO codes are attached by exact (case-insensitive, no accent
+folding, no fuzziness) name match against `CB_function_data_per_country.xlsx` (identifier columns only; its
+labour/capital/energy data is no longer used) and otherwise through the explicit, reviewable alias file
+`hazards/mappings/imf_country_aliases.csv` (columns imf_name, iso2, iso3, basis: 20 spelling aliases plus 22 IMF
+countries absent from the code table). An asset country is matched by ISO2, ISO3, IMF name, then code-table name.
+Countries in the code table that are not in the IMF file (Bermuda, Cayman Islands, Montserrat, British Virgin Islands)
+get the EMDE default.
+
+**Asset Analysis display**: the heat tables (and the CSV/Excel downloads) hide the backend-only columns `s`,
+`baseline_revenue`, `revenue_adjustment`, `nace_level`, `nace_match`, `imf_country`, `imf_match`, `heat_map_weights`
+and (when every row is a heat row) `spatial_included` (`drop_heat_backend_columns()`); the probabilistic heat table has
+no `s` columns. They remain in `results$assets_factors`.
+
+**Deterministic**: `compute_risk()` splits global-heat events off before raster extraction/spatial separation
+(`is_global_heat_event()`), builds their rows with `build_global_heat_event_factors()` and appends them to the
+shock inputs; the single-event-year shock logic is shared with every other hazard.
+
+**Probabilistic**: `compute_global_heat_aal()` blends the maps for *every year* of the horizon, evaluates the loss
+at each return period and integrates with `calculate_aal()`, extending the curve flat from RP 2 down to RP 1
+(heat has excess days in almost every year, so flood's "zero loss at RP 1" would understate it). The result is a
+yearly AAL series applied per year (`compute_aal_shock_trajectories(aal_heat_yearly =)`); the mean over years
+is shown as the single summary value; the **average annual revenue adjustment** is the mean over years of
+`baseline_revenue_t x (-AAL rate_t)` (negative = revenue lost). One probabilistic event per hazard type per run (Flood and Heat may be combined
+and are added).
+
+### Global Drought (Crop Yield) -- Global mode only
+
+Brazil's Drought hazard (SPI-3, `config/Drought.yml`, seasons Summer/Autumn/...) is untouched. Global mode has its
+own drought engine in `R/utils__drought_global.R`, activated by `hazards/config_global/Drought.yml` (indicator
+`type: global_drought_maps`). Agriculture assets only (`asset_category == "agriculture"`, case-insensitive);
+other assets get `damage_factor = 0`, `drought_status = "not applicable (non-agriculture asset)"` and no shock.
+
+**Hazard data** (`hazards/indicators/Drought Global/`): 48 GeoTIFFs `spei3_rl_<ssp>_<start>-<end>_<season>.tif`
+(4 SSPs x 3 windows 2021-2040 / 2031-2050 / 2041-2060 x seasons DJF/MAM/JJA/SON), bands `rl_<median|mean|p10|p90>_RP<2..100>`
+= SPEI-3 return level (lower = drier; values capped at -5 in the source). Read lazily like the heat maps; the inventory
+has one row per scenario x season x return period x statistic (`build_global_drought_inventory()`). Time blending reuses
+`heat_blend_weights()` (centre years 2030.5 / 2040.5 / 2050.5; years after 2050.5 use the 2041-2060 map).
+
+**Crop** (`resolve_drought_crop()`): `asset_subtype` normalised by `normalize_drought_crop()` -- Maize = Corn; "Maize 2" /
+second maize / safrinha -> Maize.2 calendar; "Winter wheat" -> Wheat.Winter calendar (both only when stated explicitly);
+Soy / Soya beans / Soybean(s) -> Soybeans. Anything else (Rice, Banana, blank, ...) -> the country's most produced of
+wheat/soy/maize from `hazards/mappings/Most used Crop Country List_WSM.xlsx` (ISO2 / ISO3 / name); country without a proxy
+-> Maize. `crop_source` = input / country_proxy / default.
+
+**Growing period** (`hazards/indicators/Drought Global Crop Calendar/<Crop>.crop.calendar.nc`, 0.5 deg): the `grow.season`
+flags of the asset's cell; a cell with no growing season for that crop -> nearest cell that has one (great-circle,
+`calendar_match = "nearest_cell"`, `calendar_distance_km`). Calendars are cached per file.
+
+**Damage** (`hazards/mappings/drought_damage_function_global.xlsx`: SPEI3, damage factor, crop Corn/Soybean/Wheat(/Rice
+unused), off_window): closest 0.1 SPEI step of the crop curve (ties -> drier step; below -3 -> -3; >= 0 -> 0), negative
+factors clamped to 0. `damage_factor = in-window factor` when the event season is a growing season, else
+`in-window factor x off_window` (0.15). Shock: `revenue * (1 - damage_factor)` in the event year (config equation).
+Assets without coordinates / outside the map: 0 damage + warning. Results carry `spei3`, `spei3_matched`, `crop`,
+`crop_source`, `growing_seasons`, `in_growing_period`, `damage_factor_in_window`, `off_window`, `drought_status`,
+`calendar_*`, `drought_revenue_adjustment` (= -baseline revenue x damage factor); backend-only columns are hidden in the
+Asset Analysis table (`DROUGHT_BACKEND_ONLY_COLS`). Warnings are returned as `results$drought_warnings`.
+
+**Deterministic**: events carry scenario, season, return period, statistic (default median), event year; split off in
+`compute_risk()` like heat (`is_global_drought_event()`), built by `build_global_drought_event_factors()`; optional
+ADM0/1/2 selection through the shared `apply_global_adm_spatial_selection()` (also used by heat).
+
+**Probabilistic** (`compute_global_drought_aal()`): per year, all four seasons are blended; per asset x season the loss
+curve over RP 2..100 (in-window full / off-window x 0.15) is integrated with `calculate_aal()` (zero loss at RP 1, flat
+beyond RP 100; evaluated through the equivalent linear weights `aal_weights_for_rps()`), and the annual drought AAL is the
+mean over the four seasons -- longer growing periods mean higher AAL. Yearly series applied per year
+(`compute_aal_shock_trajectories(aal_drought_yearly =)`), added to flood / heat AAL. No season is chosen in the UI.
+
+**UI**: season dropdown ordered DJF, MAM, JJA, SON (`order_drought_seasons()`, Brazil labels unaffected); Probabilistic
+hides season and return period; Global Drought uses the administrative-region panel like Global Heat
+(`global_adm_hazard_types()`).
+
+### Global Basin Spatial Separation (Flood, deterministic)
+
+`R/utils__global_basins.R`; shapefiles in `spatial_separation/global_basins/hybas_global_named/`
+(`named_level2_global.shp` 62 basins, `named_level4_global.shp` 1,342 basins; attributes `HYBAS_ID`,
+`BASIN_NAME`, `MACRO_REG`). UI: basin level (Global/level 2/level 4) -> macro region ("Global (all basins)" lists
+every basin; the dropdown is labelled "Continental region", values are the shapefile's `MACRO_REG`, e.g. Europe /
+South America) -> multi-select of basins; none selected = whole area. Events store `spatial_level`
+(`global`/`level2`/`level4`), `spatial_scheme = "global_basins"`, basin ids in `spatial_region_codes` and names in
+`spatial_region_labels` (labels may contain commas, so labels split only on `|`/`;`). Assets are included when their
+coordinates fall inside a selected basin (point-in-polygon); assets without coordinates are flagged
+"insufficient location data". Selected basins are highlighted on the Global status map (one toggle per event).
+
+Loading is two-stage: attributes only at app start (~0.3 s); polygons are repaired (most shipped polygons are
+invalid) and normalised to MULTIPOLYGON on first use, then cached in memory and on disk under
+`tools::R_user_dir("climate.risk.tool", "cache")` (first load ~14 s per level, ~0.2 s afterwards).
+
+The Global status map always shows the whole world (`keep_status_global_map_world_view()`): plotly's `add_sf()`
+stores each polygon layer's bounding box on the trace and `plotly_build()` would zoom the map to it (overriding any
+`layout(geo = ...)` setting), so the boxes are dropped after building and the full-world axis ranges are set. Selected
+areas are only coloured in.
+
+### Global Administrative Spatial Separation (Heat, deterministic)
+
+`R/utils__global_adm.R`; geoBoundaries CGAZ shapefiles in `spatial_separation/global_adm_regions/
+geoBoundariesCGAZ_ADM{0,1,2}/` (ADM0 218 polygons, ADM1 3,224, ADM2 49,349; fields `shapeGroup` = ISO3, `shapeName`,
+`shapeID`). `Heat.yml` sets `spatial_separation_scheme: global_adm`. UI (Heat, deterministic, Global): granularity
+(Global / Countries ADM0 / ADM1 / ADM2) -> countries (multi) -> regions of those countries (multi; ADM1/ADM2 only; the
+ADM2 list is built only for explicit countries). `build_global_adm_selection()` turns the inputs into the stored event:
+regions chosen -> exactly those; countries but no regions -> the countries as an ADM0 selection; nothing -> whole area
+(`global`). Events store `spatial_level` (`adm0`/`adm1`/`adm2`), `spatial_scheme = "global_adm"`, region ids
+(ISO3 for ADM0, `shapeID` for ADM1/ADM2) in `spatial_region_codes`, display labels in `spatial_region_labels`.
+
+Matching is point-in-polygon on the asset coordinates (same as basins); assets without coordinates are flagged
+"insufficient location data". In `compute_risk()` the heat rows of every event pass through
+`apply_heat_spatial_selection()` (reusing `evaluate_spatial_separation()`): assets outside the selection stay in
+`assets_factors` with `spatial_included = FALSE`, `spatial_multiplier = 0`, `spatial_exposure_status = "not exposed
+to selected hazard event"` and blank heat values, and are not shocked. Only the administrative levels apply to Heat;
+any other level on a heat event is ignored (whole area) with a console message. Probabilistic (AAL) heat has no
+spatial separation (like flood).
+
+Data notes: ADM1/ADM2 names repeat inside countries (601 of Brazil's 5,570 ADM2), so labels are "Name (ISO3)" for ADM1
+and "Name in Parent-ADM1 (ISO3)" for ADM2 (parent = the ADM1 polygon containing the region's interior point), with a
+stable " [n]" suffix if still identical; region ids are always the unique key. Labels contain no `|;,` (stored
+label lists are split on them). 37 ADM2 regions have no name (shown as "(unnamed)"). The ADM0 file also contains 19
+disputed-area polygons with numeric codes 111-129 (Abyei, Aksai Chin, Gaza Strip, ...), which appear in the country
+list. Loading is lazy: attributes at app start (~4 s together with the basins), polygons read per country with an OGR
+attribute filter (~0.3-1 s for Brazil's ADM2), repaired if invalid and cached for the session.
+
 ### Fire for Buildings and Agriculture
 
 **Overview**: Fire impacts use a compound indicator approach combining land cover risk, maximum Fire Weather Index (FWI), and days with significant fire weather. Fire affects both buildings (profit shock) and agriculture (revenue shock).

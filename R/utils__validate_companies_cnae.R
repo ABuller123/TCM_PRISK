@@ -281,7 +281,14 @@ validate_companies_against_assets <- function(companies_df, assets_df, validatio
   # 2) Any missing value on required company columns (row-wise).
   # Optional columns (fi, growth_rate, …) are excluded so that a user
   # who leaves them blank for some rows does not trigger a validation error.
-  optional_company_cols <- c("fi", "growth_rate")
+  # This also covers the new financials.csv/portfolio.csv input format: "pd" and
+  # "d_e" are currently unused placeholders (PD is still computed via Merton), and
+  # "name", "sector", "technology", "country" are display-only metadata not
+  # consumed anywhere in the risk calculation.
+  optional_company_cols <- c(
+    "fi", "growth_rate",
+    "pd", "d_e", "name", "sector", "technology", "country"
+  )
   required_cols_present <- setdiff(names(companies_df), optional_company_cols)
   na_matrix <- is.na(companies_df[, required_cols_present, drop = FALSE])
   if (any(na_matrix)) {

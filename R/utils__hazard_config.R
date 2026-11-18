@@ -76,7 +76,7 @@ get_hazard_spatial_scheme <- function(hazard_configs, hazard_type) {
   }
 
   scheme <- tolower(as.character(scheme))
-  if (!scheme %in% c("adm_regions", "hydro_regions")) {
+  if (!scheme %in% c("adm_regions", "hydro_regions", "global_basins", "global_adm")) {
     return("adm_regions")
   }
   scheme

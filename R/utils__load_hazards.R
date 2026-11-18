@@ -162,6 +162,39 @@ load_hazards_and_inventory <- function(
       # Determine source based on file path: if it's a directory, it's TIF-based
       indicator_path <- file.path(hazard_indicators_dir, indicator$file)
       is_dir <- dir.exists(indicator_path)
+
+      # Global heat maps: multi-band change maps that are read lazily at compute
+      # time (the map window depends on the shock year), so only inventory rows
+      # are produced here -- no rasters are added to `all_hazards`.
+      if (identical(as.character(indicator$type), "global_heat_maps")) {
+        heat_inventory <- build_global_heat_inventory(
+          hazard_type = hazard_type,
+          indicator_key = indicator_key,
+          indicator = indicator,
+          hazard_indicators_dir = hazard_indicators_dir
+        )
+        if (!is.null(heat_inventory) && nrow(heat_inventory) > 0) {
+          message("  Registered ", nrow(heat_inventory), " global heat map combinations for ", hazard_type)
+          inventory <- dplyr::bind_rows(inventory, heat_inventory)
+        }
+        next
+      }
+
+      # Global drought maps: SPEI-3 return-level maps per season, read lazily at compute
+      # time like the heat maps (inventory rows only).
+      if (identical(as.character(indicator$type), "global_drought_maps")) {
+        drought_inventory <- build_global_drought_inventory(
+          hazard_type = hazard_type,
+          indicator_key = indicator_key,
+          indicator = indicator,
+          hazard_indicators_dir = hazard_indicators_dir
+        )
+        if (!is.null(drought_inventory) && nrow(drought_inventory) > 0) {
+          message("  Registered ", nrow(drought_inventory), " global drought map combinations for ", hazard_type)
+          inventory <- dplyr::bind_rows(inventory, drought_inventory)
+        }
+        next
+      }
       
       if (indicator$source == "nc" && !is_dir) {
         nc_result <- load_nc_hazards_with_metadata(

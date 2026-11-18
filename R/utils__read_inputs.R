@@ -2,7 +2,7 @@
 to_snake_case <- function(names) {
   names |>
     gsub("([a-z])([A-Z])", "\\1_\\2", x = _) |> # camelCase to snake_case
-    gsub("\\s+", "_", x = _) |> # spaces to underscores
+    gsub("[\\s/]+", "_", x = _, perl = TRUE) |> # spaces and slashes to underscores
     gsub("\\.", "_", x = _) |> # dots to underscores
     gsub("_+", "_", x = _) |> # multiple underscores to single
     gsub("^_|_$", "", x = _) |> # remove leading/trailing underscores
@@ -62,6 +62,69 @@ detect_csv_separator <- function(file_path) {
   }
 }
 
+#' Read a tabular Excel or CSV file into a snake_case tibble (internal helper)
+#'
+#' @param xlsx_path Path to the .xlsx variant
+#' @param csv_path Path to the .csv variant
+#' @return tibble with snake_case column names, all columns read as character
+#' @noRd
+read_tabular_input <- function(xlsx_path, csv_path) {
+  if (file.exists(xlsx_path)) {
+    return(
+      readxl::read_excel(xlsx_path) |>
+        tibble::as_tibble() |>
+        dplyr::rename_with(to_snake_case)
+    )
+  }
+
+  separator <- detect_csv_separator(csv_path)
+  reader <- if (separator == "semicolon") readr::read_csv2 else readr::read_csv
+  reader(
+    csv_path,
+    col_types = readr::cols(.default = "c"),
+    show_col_types = FALSE,
+    locale = readr::locale(encoding = "UTF-8")
+  ) |>
+    tibble::as_tibble() |>
+    dplyr::rename_with(to_snake_case)
+}
+
+#' Rename columns in a data frame according to a lookup of old -> new names
+#'
+#' @param df Data frame to rename
+#' @param rename_lookup Named character vector: names are old column names, values are new names
+#' @return Data frame with matching columns renamed
+#' @noRd
+apply_column_rename <- function(df, rename_lookup) {
+  for (old_name in names(rename_lookup)) {
+    if (old_name %in% names(df)) {
+      names(df)[names(df) == old_name] <- rename_lookup[[old_name]]
+    }
+  }
+  df
+}
+
+#' Drop trailing blank rows based on an identifier column
+#'
+#' @param df Data frame to filter
+#' @param id_col Name of the identifier column to check for blanks
+#' @param label Label used in the log message (e.g. "assets", "financials")
+#' @return Data frame with blank trailing rows removed
+#' @noRd
+drop_blank_rows <- function(df, id_col, label) {
+  if (!id_col %in% names(df)) {
+    return(df)
+  }
+  n_before <- nrow(df)
+  df <- df |>
+    dplyr::filter(!is.na(.data[[id_col]]) & trimws(as.character(.data[[id_col]])) != "")
+  n_dropped <- n_before - nrow(df)
+  if (n_dropped > 0) {
+    message("[read_", label, "] Dropped ", n_dropped, " blank rows (trailing empty rows in Excel/CSV)")
+  }
+  df
+}
+
 #' Read asset data from Excel or CSV file
 #'
 #' @title Read asset information from Excel or CSV file
@@ -82,47 +145,46 @@ detect_csv_separator <- function(file_path) {
 read_assets <- function(folder_path) {
   message("[read_assets] Reading asset data from: ", folder_path)
 
-  # Check for both Excel and CSV files
-  assets_xlsx <- file.path(folder_path, "asset_information.xlsx")
-  assets_csv <- file.path(folder_path, "asset_information.csv")
-  has_xlsx <- file.exists(assets_xlsx)
-  has_csv <- file.exists(assets_csv)
+  # Legacy format: asset_information.xlsx/csv
+  legacy_xlsx <- file.path(folder_path, "asset_information.xlsx")
+  legacy_csv <- file.path(folder_path, "asset_information.csv")
+  has_legacy <- file.exists(legacy_xlsx) || file.exists(legacy_csv)
 
-  # Validate that only one format exists
-  if (has_xlsx && has_csv) {
+  # New format: assets.xlsx/csv
+  new_xlsx <- file.path(folder_path, "assets.xlsx")
+  new_csv <- file.path(folder_path, "assets.csv")
+  has_new <- file.exists(new_xlsx) || file.exists(new_csv)
+
+  # Validate that only one variant of each format exists
+  if (file.exists(legacy_xlsx) && file.exists(legacy_csv)) {
     stop("Both asset_information.xlsx and asset_information.csv found. Please use only one format.")
   }
-  if (!has_xlsx && !has_csv) {
-    stop("Neither asset_information.xlsx nor asset_information.csv found in: ", folder_path)
+  if (file.exists(new_xlsx) && file.exists(new_csv)) {
+    stop("Both assets.xlsx and assets.csv found. Please use only one format.")
+  }
+  if (has_legacy && has_new) {
+    stop(
+      "Both the legacy asset_information file and the new assets file were found in: ",
+      folder_path, ". Please use only one input format."
+    )
+  }
+  if (!has_legacy && !has_new) {
+    stop("Neither asset_information.xlsx/csv nor assets.xlsx/csv found in: ", folder_path)
   }
 
-  # Read assets data based on file format
-  if (has_xlsx) {
-    assets_raw <- readxl::read_excel(assets_xlsx) |>
-      tibble::as_tibble() |>
-      dplyr::rename_with(to_snake_case)
+  if (has_new) {
+    # New format uses different column names (ID, Asset id, Lat, Long, ...);
+    # map them onto the internal legacy column names so the rest of the
+    # pipeline (below, and everywhere downstream) is unaffected.
+    assets_raw <- read_tabular_input(new_xlsx, new_csv) |>
+      apply_column_rename(c(
+        id = "company",
+        asset_id = "asset",
+        lat = "latitude",
+        long = "longitude"
+      ))
   } else {
-    # CSV file - detect separator
-    separator <- detect_csv_separator(assets_csv)
-    if (separator == "semicolon") {
-      assets_raw <- readr::read_csv2(
-        assets_csv,
-        col_types = readr::cols(.default = "c"),
-        show_col_types = FALSE,
-        locale = readr::locale(encoding = "UTF-8")
-      ) |>
-        tibble::as_tibble() |>
-        dplyr::rename_with(to_snake_case)
-    } else {
-      assets_raw <- readr::read_csv(
-        assets_csv,
-        col_types = readr::cols(.default = "c"),
-        show_col_types = FALSE,
-        locale = readr::locale(encoding = "UTF-8")
-      ) |>
-        tibble::as_tibble() |>
-        dplyr::rename_with(to_snake_case)
-    }
+    assets_raw <- read_tabular_input(legacy_xlsx, legacy_csv)
   }
 
   # Drop blank trailing rows that Excel adds when a range is formatted beyond data
@@ -741,45 +803,212 @@ match_adm_codes_to_names <- function(assets_df, adm_codes) {
   assets_df
 }
 
+#' Read financial data from Excel or CSV file (new input format)
+#'
+#' @title Read financials information from Excel or CSV file
+#' @description Reads the financials.xlsx/csv file (new three-file input format) and maps
+#'   its columns onto the internal company column names (company, revenues, net_profit_margin, ...).
+#'   The `pd` and `d_e` columns are currently read through but not used anywhere in the pipeline
+#'   (PD is still computed via the Merton model; D/E is not used because Debt is supplied directly).
+#' @param folder_path Character string specifying the folder containing financials.xlsx or financials.csv
+#' @return tibble with financials information (internal column names)
+#' @noRd
+read_financials <- function(folder_path) {
+  xlsx_path <- file.path(folder_path, "financials.xlsx")
+  csv_path <- file.path(folder_path, "financials.csv")
+
+  if (file.exists(xlsx_path) && file.exists(csv_path)) {
+    stop("Both financials.xlsx and financials.csv found. Please use only one format.")
+  }
+  if (!file.exists(xlsx_path) && !file.exists(csv_path)) {
+    stop("Neither financials.xlsx nor financials.csv found in: ", folder_path)
+  }
+
+  financials_raw <- read_tabular_input(xlsx_path, csv_path) |>
+    apply_column_rename(c(
+      id = "company",
+      npm = "net_profit_margin",
+      revenue = "revenues"
+    )) |>
+    drop_blank_rows("company", "financials")
+
+  numeric_cols <- c("revenues", "debt", "volatility", "net_profit_margin", "pd", "d_e")
+  financials_raw <- financials_raw |>
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::any_of(numeric_cols),
+        ~ as.numeric(dplyr::if_else(as.character(.) == "", NA_character_, as.character(.)))
+      )
+    )
+
+  message("[read_financials] Loaded ", nrow(financials_raw), " companies")
+  financials_raw
+}
+
+#' Read portfolio data from Excel or CSV file (new input format)
+#'
+#' @title Read portfolio information from Excel or CSV file
+#' @description Reads the portfolio.xlsx/csv file (new three-file input format) and maps
+#'   its columns onto the internal company column names (company, loan_size, lgd, term, ...).
+#' @param folder_path Character string specifying the folder containing portfolio.xlsx or portfolio.csv
+#' @return tibble with portfolio information (internal column names)
+#' @noRd
+read_portfolio <- function(folder_path) {
+  xlsx_path <- file.path(folder_path, "portfolio.xlsx")
+  csv_path <- file.path(folder_path, "portfolio.csv")
+
+  if (file.exists(xlsx_path) && file.exists(csv_path)) {
+    stop("Both portfolio.xlsx and portfolio.csv found. Please use only one format.")
+  }
+  if (!file.exists(xlsx_path) && !file.exists(csv_path)) {
+    stop("Neither portfolio.xlsx nor portfolio.csv found in: ", folder_path)
+  }
+
+  portfolio_raw <- read_tabular_input(xlsx_path, csv_path) |>
+    apply_column_rename(c(
+      id = "company",
+      ead = "loan_size"
+    )) |>
+    drop_blank_rows("company", "portfolio")
+
+  numeric_cols <- c("loan_size", "lgd", "term")
+  portfolio_raw <- portfolio_raw |>
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::any_of(numeric_cols),
+        ~ as.numeric(dplyr::if_else(as.character(.) == "", NA_character_, as.character(.)))
+      )
+    )
+
+  message("[read_portfolio] Loaded ", nrow(portfolio_raw), " companies")
+  portfolio_raw
+}
+
+#' Determine which asset/company input file format is present in a folder
+#'
+#' @description Used by the Shiny UI (folder picker status display, and the
+#'   pre-flight check before running the analysis) to detect whether a folder
+#'   contains the legacy asset_information.xlsx/csv + company_information.xlsx/csv
+#'   files, the new assets.xlsx/csv + financials.xlsx/csv + portfolio.xlsx/csv files,
+#'   a mix of both (conflict), or neither (missing). Mirrors the detection logic in
+#'   read_assets() and read_companies() so the UI and the actual readers never disagree.
+#' @param folder Character string, path to the input folder
+#' @return list with `asset` and `company` sub-lists, each containing:
+#'   `status` ("legacy", "new", "missing", or "conflict") and `files` (character vector
+#'   of the matched file names, for display)
+#' @noRd
+resolve_input_file_status <- function(folder) {
+  has_file <- function(...) file.exists(file.path(folder, ...))
+
+  asset_legacy_files <- c("asset_information.xlsx", "asset_information.csv")[
+    c(has_file("asset_information.xlsx"), has_file("asset_information.csv"))
+  ]
+  asset_new_files <- c("assets.xlsx", "assets.csv")[
+    c(has_file("assets.xlsx"), has_file("assets.csv"))
+  ]
+
+  asset <- if (length(asset_legacy_files) > 1 || length(asset_new_files) > 1 ||
+    (length(asset_legacy_files) > 0 && length(asset_new_files) > 0)) {
+    list(status = "conflict", files = c(asset_legacy_files, asset_new_files))
+  } else if (length(asset_legacy_files) == 1) {
+    list(status = "legacy", files = asset_legacy_files)
+  } else if (length(asset_new_files) == 1) {
+    list(status = "new", files = asset_new_files)
+  } else {
+    list(status = "missing", files = character(0))
+  }
+
+  company_legacy_files <- c("company_information.xlsx", "company_information.csv")[
+    c(has_file("company_information.xlsx"), has_file("company_information.csv"))
+  ]
+  financials_files <- c("financials.xlsx", "financials.csv")[
+    c(has_file("financials.xlsx"), has_file("financials.csv"))
+  ]
+  portfolio_files <- c("portfolio.xlsx", "portfolio.csv")[
+    c(has_file("portfolio.xlsx"), has_file("portfolio.csv"))
+  ]
+  company_new_files <- c(financials_files, portfolio_files)
+  has_company_new <- length(financials_files) == 1 && length(portfolio_files) == 1
+
+  company <- if (length(company_legacy_files) > 1 || length(financials_files) > 1 ||
+    length(portfolio_files) > 1 ||
+    (length(company_legacy_files) > 0 && length(company_new_files) > 0) ||
+    (length(company_new_files) > 0 && !has_company_new)) {
+    list(status = "conflict", files = c(company_legacy_files, company_new_files))
+  } else if (length(company_legacy_files) == 1) {
+    list(status = "legacy", files = company_legacy_files)
+  } else if (has_company_new) {
+    list(status = "new", files = company_new_files)
+  } else {
+    list(status = "missing", files = character(0))
+  }
+
+  list(asset = asset, company = company)
+}
+
 #' Read company data from Excel or CSV file
 #'
 #' @title Read company information from Excel or CSV file
-#' @description Reads company information from an Excel (.xlsx) or CSV (.csv) file,
+#' @description Reads company information either from the legacy company_information.xlsx/csv
+#'   file, or from the new two-file financials.xlsx/csv + portfolio.xlsx/csv format (joined on ID),
 #'   converting column names to snake_case and parsing numeric columns correctly.
-#'   Can accept either a direct file path or a folder path containing company_information.xlsx or company_information.csv.
-#'   For CSV files, automatically detects separator (comma or semicolon).
-#'   If both Excel and CSV files exist in the folder, an error is raised.
-#' @param file_path Character string specifying either the path to the company file directly,
-#'   or a folder path containing company_information.xlsx or company_information.csv
+#'   Can accept either a direct file path or a folder path. For CSV files, automatically detects
+#'   separator (comma or semicolon). If both formats exist in the folder, an error is raised.
+#' @param file_path Character string specifying either the path to the legacy company file directly,
+#'   or a folder path containing company_information.xlsx/csv or financials.xlsx/csv + portfolio.xlsx/csv
 #' @return tibble with company information
 #' @examples
 #' \dontrun{
 #' # Direct file path
 #' companies <- read_companies("path/to/company_information.xlsx")
-#' # Or folder path (will look for .xlsx or .csv)
+#' # Or folder path (will look for .xlsx or .csv, or the new financials+portfolio files)
 #' companies <- read_companies("path/to/folder")
 #' }
 #' @export
 read_companies <- function(file_path) {
   message("[read_companies] Reading company data from: ", file_path)
 
-  # If file_path is a directory, look for company_information files
+  # If file_path is a directory, look for company_information files or the new
+  # financials.csv + portfolio.csv pair
   if (dir.exists(file_path)) {
     company_xlsx <- file.path(file_path, "company_information.xlsx")
     company_csv <- file.path(file_path, "company_information.csv")
-    has_xlsx <- file.exists(company_xlsx)
-    has_csv <- file.exists(company_csv)
+    has_legacy <- file.exists(company_xlsx) || file.exists(company_csv)
 
-    # Validate that only one format exists
-    if (has_xlsx && has_csv) {
+    financials_xlsx <- file.path(file_path, "financials.xlsx")
+    financials_csv <- file.path(file_path, "financials.csv")
+    portfolio_xlsx <- file.path(file_path, "portfolio.xlsx")
+    portfolio_csv <- file.path(file_path, "portfolio.csv")
+    has_new <- (file.exists(financials_xlsx) || file.exists(financials_csv)) &&
+      (file.exists(portfolio_xlsx) || file.exists(portfolio_csv))
+
+    if (file.exists(company_xlsx) && file.exists(company_csv)) {
       stop("Both company_information.xlsx and company_information.csv found. Please use only one format.")
     }
-    if (!has_xlsx && !has_csv) {
-      stop("Neither company_information.xlsx nor company_information.csv found in: ", file_path)
+    if (has_legacy && has_new) {
+      stop(
+        "Both the legacy company_information file and the new financials/portfolio files ",
+        "were found in: ", file_path, ". Please use only one input format."
+      )
+    }
+    if (!has_legacy && !has_new) {
+      stop(
+        "Neither company_information.xlsx/csv nor financials.csv+portfolio.csv found in: ",
+        file_path
+      )
     }
 
-    # Use the file that exists
-    file_path <- if (has_xlsx) company_xlsx else company_csv
+    if (has_new) {
+      financials <- read_financials(file_path)
+      portfolio <- read_portfolio(file_path)
+      companies_raw <- dplyr::full_join(financials, portfolio, by = "company")
+
+      message("[read_companies] Loaded ", nrow(companies_raw), " companies (financials.csv + portfolio.csv)")
+      return(companies_raw)
+    }
+
+    # Use the legacy file that exists
+    file_path <- if (file.exists(company_xlsx)) company_xlsx else company_csv
   }
 
   # Check if file exists

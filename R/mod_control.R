@@ -81,7 +81,7 @@ mod_control_ui <- function(id) {
 #' @param spatial_data_reactive optional reactive returning preloaded spatial separation data
 #' @return list with reactive values for input_folder, events, run_trigger, growth_rate, discount_rate, risk_free_rate, results_ready, and get_hazards_at_factor
 #' @export
-mod_control_server <- function(id, base_dir_reactive, overrides_reload, spatial_data_reactive = NULL) {
+mod_control_server <- function(id, base_dir_reactive, overrides_reload, spatial_data_reactive = NULL, region_reactive = NULL) {
   shiny::moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -139,46 +139,47 @@ mod_control_server <- function(id, base_dir_reactive, overrides_reload, spatial_
       }
       
       folder <- values$selected_folder
-      asset_xlsx <- file.path(folder, "asset_information.xlsx")
-      asset_csv <- file.path(folder, "asset_information.csv")
-      company_xlsx <- file.path(folder, "company_information.xlsx")
-      company_csv <- file.path(folder, "company_information.csv")
-      
-      asset_has_xlsx <- file.exists(asset_xlsx)
-      asset_has_csv <- file.exists(asset_csv)
-      company_has_xlsx <- file.exists(company_xlsx)
-      company_has_csv <- file.exists(company_csv)
-      
-      # Check for conflicts (both formats exist)
-      asset_conflict <- asset_has_xlsx && asset_has_csv
-      company_conflict <- company_has_xlsx && company_has_csv
-      
-      # Determine which files are found
-      asset_found <- if (asset_has_xlsx) "asset_information.xlsx" else if (asset_has_csv) "asset_information.csv" else NULL
-      company_found <- if (company_has_xlsx) "company_information.xlsx" else if (company_has_csv) "company_information.csv" else NULL
-      
+      file_status <- resolve_input_file_status(folder)
+
       # Build status message
       status_parts <- c()
       status_parts <- c(status_parts, paste0("Folder: ", folder))
-      
-      if (asset_conflict) {
-        status_parts <- c(status_parts, "[WARNING] Both asset_information.xlsx and asset_information.csv found - please use only one")
+
+      if (file_status$asset$status == "conflict") {
+        status_parts <- c(status_parts, paste0(
+          "[WARNING] Multiple/conflicting asset input files found (",
+          paste(file_status$asset$files, collapse = ", "),
+          ") - please keep only one of: asset_information.xlsx/csv OR assets.xlsx/csv"
+        ))
       }
-      if (company_conflict) {
-        status_parts <- c(status_parts, "[WARNING] Both company_information.xlsx and company_information.csv found - please use only one")
+      if (file_status$company$status == "conflict") {
+        status_parts <- c(status_parts, paste0(
+          "[WARNING] Multiple/conflicting company input files found (",
+          paste(file_status$company$files, collapse = ", "),
+          ") - please keep only one of: company_information.xlsx/csv OR financials.xlsx/csv + portfolio.xlsx/csv"
+        ))
       }
-      
-      if (!is.null(asset_found) && !is.null(company_found) && !asset_conflict && !company_conflict) {
-        status_parts <- c(status_parts, paste0("[OK] Found: ", asset_found, ", ", company_found))
+
+      asset_ok <- file_status$asset$status %in% c("legacy", "new")
+      company_ok <- file_status$company$status %in% c("legacy", "new")
+
+      if (asset_ok && company_ok) {
+        status_parts <- c(status_parts, paste0(
+          "[OK] Found: ", paste(c(file_status$asset$files, file_status$company$files), collapse = ", ")
+        ))
       } else {
         missing <- c()
-        if (is.null(asset_found)) missing <- c(missing, "asset_information.xlsx or asset_information.csv")
-        if (is.null(company_found)) missing <- c(missing, "company_information.xlsx or company_information.csv")
+        if (!asset_ok && file_status$asset$status != "conflict") {
+          missing <- c(missing, "asset_information.xlsx/csv or assets.xlsx/csv")
+        }
+        if (!company_ok && file_status$company$status != "conflict") {
+          missing <- c(missing, "company_information.xlsx/csv or financials.xlsx/csv + portfolio.xlsx/csv")
+        }
         if (length(missing) > 0) {
           status_parts <- c(status_parts, paste0("[X] Missing: ", paste(missing, collapse = ", ")))
         }
       }
-      
+
       paste(status_parts, collapse = "\n")
     })
 
@@ -190,7 +191,8 @@ mod_control_server <- function(id, base_dir_reactive, overrides_reload, spatial_
         return(NULL)
       }
 
-      hazards_dir <- file.path(base_dir, "hazards", "config")
+      region <- if (!is.null(region_reactive)) region_reactive() else "brazil"
+      hazards_dir <- resolve_hazards_dir(base_dir, region)
       indicators_dir <- file.path(base_dir, "hazards", "indicators")
       if (!dir.exists(hazards_dir)) {
         message("Hazards directory not found at: ", hazards_dir)
@@ -265,7 +267,8 @@ mod_control_server <- function(id, base_dir_reactive, overrides_reload, spatial_
       hazards_inventory = hazards_inventory,
       hazard_configs = hazard_configs,
       base_dir_reactive = base_dir_reactive,
-      spatial_data_reactive = spatial_data_reactive
+      spatial_data_reactive = spatial_data_reactive,
+      region_reactive = region_reactive
     )
 
     # Results ready output for conditional panel

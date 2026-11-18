@@ -132,6 +132,90 @@ testthat::test_that("mod_results_assets_server renders event-specific tables wit
   })
 })
 
+testthat::test_that("mod_results_assets_server shows AAL per asset and flood depth per RP for probabilistic events", {
+  testthat::skip_on_ci()
+  testthat::skip_if_not_installed("shiny")
+
+  # Probabilistic assets_factors: one row per asset PER RETURN PERIOD (not one
+  # row per event_id -- event_id here is the internal "aal_rp_N" synthetic id,
+  # completely disconnected from the UI's "ev1").
+  test_assets_factors <- data.frame(
+    asset = c("B1", "B1", "AG1", "AG1"),
+    company = c("TestCo", "TestCo", "TestCo", "TestCo"),
+    asset_category = c("industrial building", "industrial building", "agriculture", "agriculture"),
+    share_of_economic_activity = c(1, 1, 1, 1),
+    event_id = c("aal_rp_1", "aal_rp_2", "aal_rp_1", "aal_rp_2"),
+    hazard_type = c("Flood", "Flood", "Flood", "Flood"),
+    scenario_name = c("present", "present", "present", "present"),
+    return_period = c(10, 100, 10, 100),
+    flood_depth_cm_raw = c(50, 150, 20, 80),
+    flood_depth_cm = c(50, 150, 20, 80),
+    damage_factor = c(0.1, 0.3, 0.05, 0.2),
+    cost_factor = c(1000, 1000, NA, NA),
+    business_disruption = c(36.5, 73, 18.25, 36.5),
+    stringsAsFactors = FALSE
+  )
+
+  aal_summary <- tibble::tibble(
+    asset = c("B1", "AG1"),
+    aal_pd_profit = c(66, 0),
+    aal_pd_revenue_rate = c(0, 0.03575),
+    aal_bd_revenue_rate = c(0.0605, 0.03025)
+  )
+
+  run_events <- tibble::tibble(
+    event_id = "ev1",
+    hazard_type = "Flood",
+    hazard_name = "Flood__AAL__scenario_name=present",
+    scenario_name = "present",
+    return_period = NA_real_,
+    event_year = NA_integer_,
+    spatial_level = "brazil",
+    spatial_region_codes = NA_character_,
+    spatial_region_labels = NA_character_,
+    calc_mode = "probabilistic"
+  )
+
+  test_results <- list(
+    assets_factors = test_assets_factors,
+    aal_channels = list(summary = aal_summary)
+  )
+
+  shiny::testServer(mod_results_assets_server, args = list(
+    id = "test",
+    results_reactive = shiny::reactive(test_results),
+    events_reactive = shiny::reactive(run_events)
+  ), {
+    hazard_ui <- output$hazard_tables
+    hazard_ui_html <- htmltools::renderTags(hazard_ui)$html
+    testthat::expect_true(grepl("ev1 \\| Flood \\| NA", hazard_ui_html))
+    testthat::expect_true(grepl("Mode:", hazard_ui_html))
+    testthat::expect_true(grepl("Probabilistic \\(AAL\\)", hazard_ui_html))
+
+    table_data <- session$userData$hazard_tables_data
+    testthat::expect_length(table_data, 1)
+    probabilistic_table <- table_data[[1]]
+
+    testthat::expect_true(is.data.frame(probabilistic_table))
+    testthat::expect_equal(nrow(probabilistic_table), 2)
+    testthat::expect_true(all(c("asset", "asset_category") %in% names(probabilistic_table)))
+
+    # Flood depth per RP, pivoted wide -- NOT empty, unlike the reported bug
+    testthat::expect_true("Flood Depth (cm) (RP=10)" %in% names(probabilistic_table))
+    testthat::expect_true("Flood Depth (cm) (RP=100)" %in% names(probabilistic_table))
+    b1_row <- dplyr::filter(probabilistic_table, asset == "B1")
+    testthat::expect_equal(b1_row$`Flood Depth (cm) (RP=10)`, 50)
+    testthat::expect_equal(b1_row$`Flood Depth (cm) (RP=100)`, 150)
+
+    # AAL per asset, joined in from results$aal_channels$summary
+    testthat::expect_true("AAL Physical Damage - Profit ($)" %in% names(probabilistic_table))
+    testthat::expect_true("AAL Business Disruption - Revenue Rate" %in% names(probabilistic_table))
+    testthat::expect_equal(b1_row$`AAL Physical Damage - Profit ($)`, "$66")
+    ag1_row <- dplyr::filter(probabilistic_table, asset == "AG1")
+    testthat::expect_equal(ag1_row$`AAL Physical Damage - Revenue Rate`, 0.03575, tolerance = 1e-8)
+  })
+})
+
 testthat::test_that("mod_results_assets_server handles NULL results gracefully", {
   testthat::skip_on_ci()
   testthat::skip_if_not_installed("shiny")

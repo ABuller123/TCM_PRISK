@@ -32,6 +32,243 @@ mod_results_assets_ui <- function(id) {
   )
 }
 
+#' Build the probabilistic-mode Asset Exposures table (internal)
+#'
+#' @noRd
+# Heat columns kept in the results object (backend) but not shown in the Asset Analysis
+# tables or the CSV/Excel downloads: intermediate or matching diagnostics rather than results.
+HEAT_BACKEND_ONLY_COLS <- c(
+  "s", "baseline_revenue", "revenue_adjustment", "nace_level", "nace_match",
+  "imf_country", "imf_match", "heat_map_weights"
+)
+
+# Hides the backend-only heat columns from a table. `spatial_included` is a heat-only
+# diagnostic too (heat rows are always "included"), but flood/other rows in a mixed table still
+# need it, so it is hidden only when every row is a heat row.
+drop_heat_backend_columns <- function(df) {
+  df <- drop_drought_backend_columns(df)
+  if (is.null(df) || !"excess_heat_days" %in% names(df)) {
+    return(df)
+  }
+  is_heat_row <- if ("hazard_type" %in% names(df)) {
+    !is.na(df$hazard_type) & df$hazard_type == "Heat"
+  } else {
+    !is.na(df$excess_heat_days)
+  }
+  drop_cols <- HEAT_BACKEND_ONLY_COLS
+  if (nrow(df) > 0 && all(is_heat_row)) {
+    drop_cols <- c(drop_cols, "spatial_included")
+  }
+  df |>
+    dplyr::select(-dplyr::any_of(drop_cols))
+}
+
+# Global drought columns kept in the results object (backend) but not shown in the Asset
+# Analysis tables: internal keys, calendar cell coordinates and per-season flags (the
+# readable `growing_seasons` / `in_growing_period` columns are shown instead).
+DROUGHT_BACKEND_ONLY_COLS <- c(
+  "is_agriculture", "crop_key", "damage_crop", "calendar_lon", "calendar_lat",
+  "gs_DJF", "gs_MAM", "gs_JJA", "gs_SON", "drought_map_weights"
+)
+
+drop_drought_backend_columns <- function(df) {
+  if (is.null(df) || !"drought_status" %in% names(df)) {
+    return(df)
+  }
+  df |>
+    dplyr::select(-dplyr::any_of(DROUGHT_BACKEND_ONLY_COLS))
+}
+
+# Probabilistic-mode Asset Exposures table: unlike deterministic assets_factors
+# (one row per asset per single event), probabilistic assets_factors has one row
+# per asset PER RETURN PERIOD, with no per-row match to the UI's single event_id.
+# This pivots the per-return-period diagnostics (flood depth, damage factor,
+# business disruption) wide -- one column set per RP -- and joins in the
+# integrated per-asset AAL (physical damage, business interruption) from
+# results$aal_channels$summary, giving one row per asset.
+build_probabilistic_assets_table <- function(assets_factors_by_rp, aal_summary, hazard_type_val = NULL) {
+  if (is.null(assets_factors_by_rp) || nrow(assets_factors_by_rp) == 0) {
+    return(tibble::tibble())
+  }
+
+  # With both a Flood and a Heat probabilistic event in one run, each event's panel
+  # shows only its own hazard's rows and AAL columns.
+  if (!is.null(hazard_type_val) && "hazard_type" %in% names(assets_factors_by_rp)) {
+    assets_factors_by_rp <- assets_factors_by_rp |>
+      dplyr::filter(.data$hazard_type == !!hazard_type_val)
+    if (nrow(assets_factors_by_rp) == 0) {
+      return(tibble::tibble())
+    }
+  }
+  # Global drought (crop yield) AAL has its own layout: per-season SPEI-3 and the
+  # season-averaged loss rate per return period.
+  if ("drought_loss_rate" %in% names(assets_factors_by_rp) && any(!is.na(assets_factors_by_rp$drought_loss_rate))) {
+    return(build_probabilistic_drought_table(
+      assets_factors_by_rp[!is.na(assets_factors_by_rp$drought_loss_rate), , drop = FALSE],
+      aal_summary
+    ))
+  }
+  assets_factors_by_rp <- assets_factors_by_rp |>
+    dplyr::select(-dplyr::any_of(c(
+      "drought_loss_rate", paste0("spei3_", DROUGHT_SEASONS), "crop_input", "crop_key", "crop", "crop_source",
+      "damage_crop", "calendar_crop", "calendar_match", "calendar_distance_km", "calendar_lon", "calendar_lat",
+      paste0("gs_", DROUGHT_SEASONS), "growing_seasons", "is_agriculture", "off_window"
+    )))
+
+  # A flood-only table can still carry an all-NA excess_heat_days column when a heat event
+  # was run alongside it (rows are bound across hazards), so test for actual heat values.
+  is_heat_table <- "excess_heat_days" %in% names(assets_factors_by_rp) &&
+    any(!is.na(assets_factors_by_rp$excess_heat_days))
+  if (!is_heat_table) {
+    assets_factors_by_rp <- assets_factors_by_rp |>
+      dplyr::select(-dplyr::any_of(c(
+        "excess_heat_days", "lp_exposure", "lp_loss", "nace_code", "nace_level", "nace_match",
+        "nace_description", "nace_input", "imf_country", "imf_group", "imf_match", "beta_L", "beta_L_source",
+        "s", "output_change_pct", "statistic"
+      )))
+  }
+
+  depth_col <- if ("flood_depth_cm_raw" %in% names(assets_factors_by_rp)) {
+    "flood_depth_cm_raw"
+  } else if ("flood_depth_cm" %in% names(assets_factors_by_rp)) {
+    "flood_depth_cm"
+  } else {
+    NA_character_
+  }
+
+  base_cols <- intersect(
+    c("asset", "company", "asset_category", "share_of_economic_activity",
+      if (is_heat_table) c("nace_code", "lp_exposure", "lp_loss", "statistic", "country", "imf_group", "beta_L", "beta_L_source")),
+    names(assets_factors_by_rp)
+  )
+  asset_meta <- assets_factors_by_rp |>
+    dplyr::select(dplyr::all_of(base_cols)) |>
+    dplyr::distinct(.data$asset, .keep_all = TRUE)
+
+  metric_cols <- intersect(
+    if (is_heat_table) c("excess_heat_days", "output_change_pct") else c(depth_col, "damage_factor", "business_disruption"),
+    names(assets_factors_by_rp)
+  )
+  metric_cols <- metric_cols[!is.na(metric_cols)]
+
+  metric_labels <- c(
+    excess_heat_days = "Excess Heat Days",
+    output_change_pct = "Output Change (fraction)",
+    flood_depth_cm_raw = "Flood Depth (cm)",
+    flood_depth_cm = "Flood Depth (cm)",
+    damage_factor = "Damage Factor",
+    business_disruption = "Business Disruption (days)"
+  )
+
+  result <- asset_meta
+
+  if (length(metric_cols) > 0 && "return_period" %in% names(assets_factors_by_rp)) {
+    for (col in metric_cols) {
+      wide_piece <- assets_factors_by_rp |>
+        dplyr::select("asset", "return_period", value = dplyr::all_of(col)) |>
+        dplyr::mutate(
+          value = if (identical(col, "excess_heat_days")) {
+                round(.data$value, 1)
+              } else if (identical(col, "output_change_pct")) {
+                round(.data$value, 6)
+              } else {
+                .data$value
+              },
+          rp_col = paste0(metric_labels[[col]], " (RP=", .data$return_period, ")")
+        ) |>
+        dplyr::select(-"return_period") |>
+        tidyr::pivot_wider(names_from = "rp_col", values_from = "value")
+      result <- result |> dplyr::left_join(wide_piece, by = "asset")
+    }
+  }
+
+  if (!is.null(aal_summary) && is.data.frame(aal_summary) && nrow(aal_summary) > 0) {
+    if (is_heat_table) {
+      aal_display <- aal_summary |>
+        dplyr::select(
+          "asset",
+          "AAL Labour Productivity - Revenue Rate (mean over years)" = "aal_lp_revenue_rate",
+          dplyr::any_of(c("Average Annual Revenue Adjustment ($)" = "avg_annual_revenue_adjustment"))
+        ) |>
+        dplyr::mutate(
+          dplyr::across(dplyr::any_of("AAL Labour Productivity - Revenue Rate (mean over years)"), ~ round(.x, 6)),
+          dplyr::across(dplyr::any_of("Average Annual Revenue Adjustment ($)"), ~ round(.x, 0))
+        )
+    } else {
+      aal_display <- aal_summary |>
+        dplyr::select(-dplyr::any_of(c(
+          "aal_lp_revenue_rate", "avg_annual_revenue_adjustment",
+          "aal_drought_revenue_rate", "avg_annual_drought_revenue_adjustment"
+        ))) |>
+        dplyr::mutate(
+          aal_pd_profit = paste0("$", formatC(round(.data$aal_pd_profit), format = "f", digits = 0, big.mark = ","))
+        ) |>
+        dplyr::rename(
+          "AAL Physical Damage - Profit ($)" = "aal_pd_profit",
+          "AAL Physical Damage - Revenue Rate" = "aal_pd_revenue_rate",
+          "AAL Business Disruption - Revenue Rate" = "aal_bd_revenue_rate"
+        )
+    }
+    result <- result |> dplyr::left_join(aal_display, by = "asset")
+  }
+
+  result
+}
+
+#' Probabilistic-mode Asset Exposures table for global Drought (internal)
+#'
+#' @description One row per agriculture asset: crop, growing seasons and calendar match,
+#'   then per return period the SPEI-3 of each season (mean over the horizon) and the
+#'   season-averaged yield-loss rate, then the drought AAL and revenue adjustment.
+#' @noRd
+build_probabilistic_drought_table <- function(drought_by_rp, aal_summary) {
+  base_cols <- intersect(
+    c("asset", "company", "asset_category", "share_of_economic_activity", "country",
+      "crop_input", "crop", "crop_source", "calendar_crop", "growing_seasons", "calendar_match",
+      "calendar_distance_km", "off_window", "statistic"),
+    names(drought_by_rp)
+  )
+  result <- drought_by_rp |>
+    dplyr::select(dplyr::all_of(base_cols)) |>
+    dplyr::distinct(.data$asset, .keep_all = TRUE)
+  if ("calendar_distance_km" %in% names(result)) {
+    result$calendar_distance_km <- round(result$calendar_distance_km, 0)
+  }
+  result <- label_assumed_drought_crop(result)
+
+  metric_cols <- intersect(c(paste0("spei3_", DROUGHT_SEASONS), "drought_loss_rate"), names(drought_by_rp))
+  labels <- c(
+    stats::setNames(paste0("SPEI-3 ", DROUGHT_SEASONS), paste0("spei3_", DROUGHT_SEASONS)),
+    drought_loss_rate = "Yield Loss Rate (mean over seasons)"
+  )
+  for (col in metric_cols) {
+    wide_piece <- drought_by_rp |>
+      dplyr::select("asset", "return_period", value = dplyr::all_of(col)) |>
+      dplyr::mutate(
+        value = round(.data$value, if (identical(col, "drought_loss_rate")) 6 else 2),
+        rp_col = paste0(labels[[col]], " (RP=", .data$return_period, ")")
+      ) |>
+      dplyr::select(-"return_period") |>
+      tidyr::pivot_wider(names_from = "rp_col", values_from = "value")
+    result <- result |> dplyr::left_join(wide_piece, by = "asset")
+  }
+
+  if (!is.null(aal_summary) && is.data.frame(aal_summary) && "aal_drought_revenue_rate" %in% names(aal_summary)) {
+    aal_display <- aal_summary |>
+      dplyr::select(
+        "asset",
+        "AAL Drought Yield Loss - Revenue Rate (mean over years)" = "aal_drought_revenue_rate",
+        dplyr::any_of(c("Average Annual Revenue Adjustment ($)" = "avg_annual_drought_revenue_adjustment"))
+      ) |>
+      dplyr::mutate(
+        dplyr::across(dplyr::any_of("AAL Drought Yield Loss - Revenue Rate (mean over years)"), ~ round(.x, 6)),
+        dplyr::across(dplyr::any_of("Average Annual Revenue Adjustment ($)"), ~ round(.x, 0))
+      )
+    result <- result |> dplyr::left_join(aal_display, by = "asset")
+  }
+  result
+}
+
 #' results_assets Server Functions
 #'
 #' @param id Internal parameter for shiny
@@ -268,11 +505,46 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
           )
       }
 
+      # Global heat rows: show the matched NACE activity as the sector (the CNAE lookup below
+      # would mislabel NACE codes) and keep the heat columns readable.
+      if ("excess_heat_days" %in% names(assets_df)) {
+        assets_df <- assets_df |>
+          dplyr::mutate(
+            excess_heat_days = round(.data$excess_heat_days, 1),
+            lp_loss = round(.data$lp_loss, 4),
+            dplyr::across(dplyr::any_of("output_change_pct"), ~ round(.x, 6))
+          )
+      }
+      # Global drought rows: readable SPEI-3 / distance values
+      if ("drought_status" %in% names(assets_df)) {
+        assets_df <- assets_df |>
+          dplyr::mutate(
+            dplyr::across(dplyr::any_of(c("spei3", "spei3_matched")), ~ round(.x, 2)),
+            dplyr::across(dplyr::any_of("calendar_distance_km"), ~ round(.x, 0)),
+            dplyr::across(dplyr::any_of(c("damage_factor", "damage_factor_in_window")), ~ round(.x, 6))
+          ) |>
+          label_assumed_drought_crop()
+      }
+      heat_sector <- if ("nace_description" %in% names(assets_df)) assets_df$nace_description else NULL
+
       original_has_sector <- "sector" %in% names(assets_df)
 
       assets_df <- attach_sector_metadata(assets_df, cnae_exposure)
+      if (!is.null(heat_sector)) {
+        existing_sector <- if ("sector" %in% names(assets_df)) {
+          as.character(assets_df$sector)
+        } else {
+          rep(NA_character_, nrow(assets_df))
+        }
+        assets_df$sector <- dplyr::coalesce(heat_sector, existing_sector)
+        assets_df <- assets_df |>
+          dplyr::select(-dplyr::any_of(c("nace_description", "nace_input", "country_input", "sector_name", "sector_code")))
+        original_has_sector <- TRUE
+      }
 
-      assets_df <- if (original_has_sector) {
+      assets_df <- if (!is.null(heat_sector)) {
+        assets_df
+      } else if (original_has_sector) {
         assets_df |>
           dplyr::mutate(
             sector = dplyr::coalesce(
@@ -311,7 +583,8 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
       # Remove internal keys and raw extraction columns from display
       assets_df <- assets_df |>
         dplyr::select(-dplyr::any_of(c("indicator_key", "hazard_key", "hazard_indicator"))) |>
-        dplyr::select(-dplyr::matches("_raw$"))
+        dplyr::select(-dplyr::matches("_raw$")) |>
+        drop_heat_backend_columns()
 
       if (!include_sector_name) {
         assets_df <- assets_df |>
@@ -341,7 +614,31 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         "spatial_multiplier",
         "hazard_return_period",
         "event_year",
-        "damage_factor"
+        "damage_factor",
+        "statistic",
+        "season",
+        "crop",
+        "crop_source",
+        "growing_seasons",
+        "in_growing_period",
+        "spei3",
+        "spei3_matched",
+        "damage_factor_in_window",
+        "off_window",
+        "drought_status",
+        "calendar_crop",
+        "calendar_match",
+        "calendar_distance_km",
+        "drought_revenue_adjustment",
+        "excess_heat_days",
+        "lp_exposure",
+        "lp_loss",
+        "nace_code",
+        "country",
+        "imf_group",
+        "beta_L",
+        "beta_L_source",
+        "output_change_pct"
       )
       existing_priority <- intersect(priority_cols, names(assets_df))
       other_cols <- setdiff(names(assets_df), existing_priority)
@@ -402,7 +699,8 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         "event_year",
         "spatial_level",
         "spatial_region_codes",
-        "spatial_region_labels"
+        "spatial_region_labels",
+        "calc_mode"
       )
 
       out <- events_df
@@ -417,7 +715,8 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         dplyr::mutate(
           event_id = as.character(.data$event_id),
           return_period = suppressWarnings(as.numeric(.data$return_period)),
-          event_year = suppressWarnings(as.integer(.data$event_year))
+          event_year = suppressWarnings(as.integer(.data$event_year)),
+          calc_mode = dplyr::coalesce(as.character(.data$calc_mode), "deterministic")
         ) |>
         dplyr::filter(!is.na(.data$event_id) & nzchar(.data$event_id)) |>
         dplyr::distinct(.data$event_id, .keep_all = TRUE)
@@ -564,8 +863,12 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
     }
 
     build_event_metadata_ui <- function(event_row) {
+      calc_mode_val <- if ("calc_mode" %in% names(event_row)) event_row$calc_mode[[1]] else "deterministic"
+      mode_label <- if (identical(calc_mode_val, "probabilistic")) "Probabilistic (AAL)" else "Deterministic"
+
       metadata_items <- list(
         list(label = "Event ID", value = event_row$event_id),
+        list(label = "Mode", value = mode_label),
         list(label = "Hazard Type", value = event_row$hazard_type),
         list(label = "Hazard Name", value = event_row$hazard_name),
         list(label = "Scenario", value = event_row$scenario_name),
@@ -706,6 +1009,35 @@ mod_results_assets_server <- function(id, results_reactive, name_mapping_reactiv
         event_id_val <- event_row$event_id[[1]]
 
         output[[paste0("assets_table_", idx)]] <- DT::renderDataTable({
+          calc_mode_val <- if ("calc_mode" %in% names(event_row)) event_row$calc_mode[[1]] else "deterministic"
+
+          if (identical(calc_mode_val, "probabilistic")) {
+            # Probabilistic assets_factors has one row per asset PER RETURN
+            # PERIOD (not one row per event_id), so it isn't filtered by
+            # event_id_val at all -- every row already belongs to this one
+            # scenario/hazard_type by construction (see compute_risk_probabilistic()).
+            probabilistic_table <- build_probabilistic_assets_table(
+              assets, results$aal_channels$summary,
+              hazard_type_val = if ("hazard_type" %in% names(event_row)) as.character(event_row$hazard_type[[1]]) else NULL
+            )
+            session$userData$hazard_tables_data[[idx]] <- probabilistic_table
+            session$userData$hazard_tables_display_data[[idx]] <- probabilistic_table
+
+            if (is.null(probabilistic_table) || nrow(probabilistic_table) == 0) {
+              return(DT::datatable(
+                tibble::tibble(Message = "No assets available for this event."),
+                options = list(dom = "t"),
+                rownames = FALSE
+              ))
+            }
+
+            return(DT::datatable(
+              probabilistic_table,
+              options = list(pageLength = 25, scrollX = TRUE),
+              rownames = FALSE
+            ))
+          }
+
           current_assets <- assets
 
           if ("event_id" %in% names(current_assets) && !is.na(event_id_val) && nzchar(as.character(event_id_val))) {

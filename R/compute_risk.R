@@ -280,237 +280,300 @@ compute_risk <- function(assets,
     )
   }
 
+  hazards_inventory <- drop_heat_ui_inventory_columns(hazards_inventory)
+
+  # Global heat events (labour productivity) and global drought events (crop yield)
+  # are resolved by their own engines (see utils__heat_global.R, utils__drought_global.R)
+  # and never pass through raster extraction, spatial separation or the generic mapping
+  # joins. `events` keeps only the remaining (core) events for Phase 2; `events_all` is
+  # used for the shock sequence.
+  events_all <- events
+  is_heat_event <- is_global_heat_event(events, hazard_configs)
+  is_drought_event <- is_global_drought_event(events, hazard_configs)
+  events_heat <- events[is_heat_event, , drop = FALSE]
+  events_drought <- events[is_drought_event, , drop = FALSE]
+  events <- events[!is_heat_event & !is_drought_event, , drop = FALSE]
+  has_core_events <- nrow(events) > 0
+
   # Filter assets to only include those with matching companies
   assets <- filter_assets_by_companies(assets, companies)
 
-  # Filter hazards to only those referenced by events
-  # Note: For multi-indicator hazards (Fire), this will internally expand to load all required indicators
-  # Note: For NC hazards, only the mean ensemble is loaded by default
-  hazards <- filter_hazards_by_events(hazards, events, hazards_inventory, hazard_configs)
+  if (has_core_events) {
+    # Filter hazards to only those referenced by events
+    # Note: For multi-indicator hazards (Fire), this will internally expand to load all required indicators
+    # Note: For NC hazards, only the mean ensemble is loaded by default
+    hazards <- filter_hazards_by_events(hazards, events, hazards_inventory, hazard_configs)
 
 
-  # ============================================================================
-  # PHASE 2: GEOSPATIAL - Extract hazard statistics (spatial or precomputed)
-  # ============================================================================
-  .report_progress(0.25, "Extracting hazard statistics...")
+    # ============================================================================
+    # PHASE 2: GEOSPATIAL - Extract hazard statistics (spatial or precomputed)
+    # ============================================================================
+    .report_progress(0.25, "Extracting hazard statistics...")
 
-  # Filter inventory to match filtered hazards (prevent warnings about unfound hazards)
-  filtered_hazard_keys <- names(hazards)
-  filtered_inventory <- hazards_inventory |>
-    dplyr::filter(.data$indicator_key %in% filtered_hazard_keys)
+    # Filter inventory to match filtered hazards (prevent warnings about unfound hazards)
+    filtered_hazard_keys <- names(hazards)
+    filtered_inventory <- hazards_inventory |>
+      dplyr::filter(.data$indicator_key %in% filtered_hazard_keys)
 
-  # Extract hazard statistics: spatial extraction for assets with coordinates,
-  # precomputed lookup for assets with municipality/state only
-  assets_long <- extract_hazard_statistics(
-    assets_df = assets,
-    hazards = hazards,
-    hazards_inventory = filtered_inventory,
-    precomputed_hazards = precomputed_hazards,
-    hazard_configs = hazard_configs,
-    aggregation_method = aggregation_method
-  )
+    # Extract hazard statistics: spatial extraction for assets with coordinates,
+    # precomputed lookup for assets with municipality/state only
+    assets_long <- extract_hazard_statistics(
+      assets_df = assets,
+      hazards = hazards,
+      hazards_inventory = filtered_inventory,
+      precomputed_hazards = precomputed_hazards,
+      hazard_configs = hazard_configs,
+      aggregation_method = aggregation_method
+    )
 
-  # Step 2.3: Join event information (event_year, scenario_name) from events
-  # For multi-indicator hazards (Fire), create a mapping from all indicator hazard_names to the event
-  # For single-indicator hazards, use hazard_name directly
-  events_expanded_for_join <- create_event_hazard_mapping(events, hazards_inventory, hazard_configs)
+    # Step 2.3: Join event information (event_year, scenario_name) from events
+    # For multi-indicator hazards (Fire), create a mapping from all indicator hazard_names to the event
+    # For single-indicator hazards, use hazard_name directly
+    events_expanded_for_join <- create_event_hazard_mapping(events, hazards_inventory, hazard_configs)
   
-    # Join with explicit suffixes to handle overlapping columns between extraction and events
-    # We prioritize event-level metadata (like scenario_name, return_period) over
-    # metadata extracted from raster filenames.
-    assets_with_events <- assets_long |>
-      dplyr::inner_join(
-        events_expanded_for_join,
-        by = "indicator_key",
-        suffix = c(".extracted", ".event"),
-        relationship = "many-to-many"
-      )
+      # Join with explicit suffixes to handle overlapping columns between extraction and events
+      # We prioritize event-level metadata (like scenario_name, return_period) over
+      # metadata extracted from raster filenames.
+      assets_with_events <- assets_long |>
+        dplyr::inner_join(
+          events_expanded_for_join,
+          by = "indicator_key",
+          suffix = c(".extracted", ".event"),
+          relationship = "many-to-many"
+        )
     
-    # Identify all columns that came from the event table (they have .event suffix or no suffix if unique)
-    event_cols <- names(events_expanded_for_join)
-    # Preserve per-indicator metadata from extraction
-    event_cols <- setdiff(event_cols, c("indicator_key", "hazard_indicator", "hazard_type", "matching_method"))
+      # Identify all columns that came from the event table (they have .event suffix or no suffix if unique)
+      event_cols <- names(events_expanded_for_join)
+      # Preserve per-indicator metadata from extraction
+      event_cols <- setdiff(event_cols, c("indicator_key", "hazard_indicator", "hazard_type", "matching_method"))
     
-    # CRITICAL: Filter out columns that don't exist in assets_with_events
-    # This can happen if events_expanded_for_join has columns not present in assets_long
-    event_cols <- intersect(event_cols, names(assets_with_events))
+      # CRITICAL: Filter out columns that don't exist in assets_with_events
+      # This can happen if events_expanded_for_join has columns not present in assets_long
+      event_cols <- intersect(event_cols, names(assets_with_events))
     
-    for (col in event_cols) {
-      event_col_name <- if (paste0(col, ".event") %in% names(assets_with_events)) paste0(col, ".event") else col
-      extracted_col_name <- paste0(col, ".extracted")
+      for (col in event_cols) {
+        event_col_name <- if (paste0(col, ".event") %in% names(assets_with_events)) paste0(col, ".event") else col
+        extracted_col_name <- paste0(col, ".extracted")
       
-      # If we have an event-specific version of this column, use it to overwrite/create the main column
-      if (event_col_name %in% names(assets_with_events)) {
-        # CRITICAL FIX: Use simple assignment instead of mutate to avoid many-to-many issues
-        # with character columns that might contain commas or other special characters
-        assets_with_events[[col]] <- assets_with_events[[event_col_name]]
+        # If we have an event-specific version of this column, use it to overwrite/create the main column
+        if (event_col_name %in% names(assets_with_events)) {
+          # CRITICAL FIX: Use simple assignment instead of mutate to avoid many-to-many issues
+          # with character columns that might contain commas or other special characters
+          assets_with_events[[col]] <- assets_with_events[[event_col_name]]
         
-        # Clean up the suffixed columns
-        if (event_col_name != col) {
-          assets_with_events[[event_col_name]] <- NULL
-        }
-        if (extracted_col_name %in% names(assets_with_events)) {
-          assets_with_events[[extracted_col_name]] <- NULL
-        }
-      }
-    }
-
-    # Ensure matching_method is preserved from extraction
-    if (paste0("matching_method", ".extracted") %in% names(assets_with_events)) {
-      assets_with_events$matching_method <- assets_with_events[["matching_method.extracted"]]
-      assets_with_events[["matching_method.extracted"]] <- NULL
-    }
-    if (paste0("matching_method", ".event") %in% names(assets_with_events)) {
-      assets_with_events[["matching_method.event"]] <- NULL
-    }
-
-    # Ensure hazard_type is preserved (required downstream)
-    if (paste0("hazard_type", ".extracted") %in% names(assets_with_events)) {
-      assets_with_events$hazard_type <- assets_with_events[["hazard_type.extracted"]]
-      assets_with_events[["hazard_type.extracted"]] <- NULL
-    }
-    if (paste0("hazard_type", ".event") %in% names(assets_with_events)) {
-      if (!"hazard_type" %in% names(assets_with_events)) {
-        assets_with_events$hazard_type <- assets_with_events[["hazard_type.event"]]
-      }
-      assets_with_events[["hazard_type.event"]] <- NULL
-    }
-
-    # Ensure hazard_name is preserved (needed for display in results)
-    if (paste0("hazard_name", ".event") %in% names(assets_with_events)) {
-      assets_with_events$hazard_name <- assets_with_events[["hazard_name.event"]]
-      assets_with_events[["hazard_name.event"]] <- NULL
-    }
-    if (paste0("hazard_name", ".extracted") %in% names(assets_with_events)) {
-      if (!"hazard_name" %in% names(assets_with_events)) {
-        assets_with_events$hazard_name <- assets_with_events[["hazard_name.extracted"]]
-      }
-      assets_with_events[["hazard_name.extracted"]] <- NULL
-    }
-
-    # Remove the source column entirely as requested - we only care about matching_method
-    # We do this for all possible variants of the source column
-    source_cols <- grep("^source(\\..+)?$", names(assets_with_events), value = TRUE)
-    if (length(source_cols) > 0) {
-      for (scol in source_cols) {
-        assets_with_events[[scol]] <- NULL
-      }
-    }
-
-    # Preserve per-indicator metadata from extraction when suffixes exist
-    # This must be OUTSIDE the loop to ensure it runs even if event_cols is empty
-    if (paste0("hazard_indicator", ".extracted") %in% names(assets_with_events)) {
-      assets_with_events$hazard_indicator <- assets_with_events[["hazard_indicator.extracted"]]
-      assets_with_events[["hazard_indicator.extracted"]] <- NULL
-    }
-    if (paste0("hazard_indicator", ".event") %in% names(assets_with_events)) {
-      assets_with_events[["hazard_indicator.event"]] <- NULL
-    }
-
-    # Backfill missing index columns (e.g., season) from inventory when absent
-    # This prevents mapping joins from failing when a required index is missing
-    index_backfill_cols <- intersect(
-      c("season", "scenario_name", "return_period", "gwl", "ensemble"),
-      names(hazards_inventory)
-    )
-    if (length(index_backfill_cols) > 0) {
-      inventory_backfill <- hazards_inventory |>
-        dplyr::select("indicator_key", dplyr::any_of(index_backfill_cols)) |>
-        dplyr::distinct(.data$indicator_key, .keep_all = TRUE)
-
-      assets_with_events <- assets_with_events |>
-        dplyr::left_join(inventory_backfill, by = "indicator_key", suffix = c("", ".inv"))
-
-      for (col in index_backfill_cols) {
-        inv_col <- paste0(col, ".inv")
-        if (inv_col %in% names(assets_with_events)) {
-          if (col %in% names(assets_with_events)) {
-            assets_with_events[[col]] <- dplyr::coalesce(assets_with_events[[col]], assets_with_events[[inv_col]])
-          } else {
-            assets_with_events[[col]] <- assets_with_events[[inv_col]]
+          # Clean up the suffixed columns
+          if (event_col_name != col) {
+            assets_with_events[[event_col_name]] <- NULL
           }
-          assets_with_events[[inv_col]] <- NULL
+          if (extracted_col_name %in% names(assets_with_events)) {
+            assets_with_events[[extracted_col_name]] <- NULL
+          }
         }
       }
-    }
 
-  # Step 2.4: Apply spatial separation (per event) before mapping/shock joins
-  .report_progress(0.50, "Applying spatial separation...")
-  spatial_eval <- evaluate_spatial_separation(
-    assets_with_events = assets_with_events,
-    events = events,
-    hazard_configs = hazard_configs,
-    spatial_separation_data = spatial_separation_data,
-    base_dir = base_dir,
-    adm1_boundaries = adm1_boundaries,
-    adm2_boundaries = adm2_boundaries
-  )
+      # Ensure matching_method is preserved from extraction
+      if (paste0("matching_method", ".extracted") %in% names(assets_with_events)) {
+        assets_with_events$matching_method <- assets_with_events[["matching_method.extracted"]]
+        assets_with_events[["matching_method.extracted"]] <- NULL
+      }
+      if (paste0("matching_method", ".event") %in% names(assets_with_events)) {
+        assets_with_events[["matching_method.event"]] <- NULL
+      }
 
-  assets_with_events <- assets_with_events |>
-    dplyr::left_join(spatial_eval, by = c("asset", "event_id")) |>
-    dplyr::mutate(
-      spatial_included = dplyr::coalesce(.data$spatial_included, TRUE),
-      spatial_multiplier = dplyr::coalesce(as.numeric(.data$spatial_multiplier), 1)
+      # Ensure hazard_type is preserved (required downstream)
+      if (paste0("hazard_type", ".extracted") %in% names(assets_with_events)) {
+        assets_with_events$hazard_type <- assets_with_events[["hazard_type.extracted"]]
+        assets_with_events[["hazard_type.extracted"]] <- NULL
+      }
+      if (paste0("hazard_type", ".event") %in% names(assets_with_events)) {
+        if (!"hazard_type" %in% names(assets_with_events)) {
+          assets_with_events$hazard_type <- assets_with_events[["hazard_type.event"]]
+        }
+        assets_with_events[["hazard_type.event"]] <- NULL
+      }
+
+      # Ensure hazard_name is preserved (needed for display in results)
+      if (paste0("hazard_name", ".event") %in% names(assets_with_events)) {
+        assets_with_events$hazard_name <- assets_with_events[["hazard_name.event"]]
+        assets_with_events[["hazard_name.event"]] <- NULL
+      }
+      if (paste0("hazard_name", ".extracted") %in% names(assets_with_events)) {
+        if (!"hazard_name" %in% names(assets_with_events)) {
+          assets_with_events$hazard_name <- assets_with_events[["hazard_name.extracted"]]
+        }
+        assets_with_events[["hazard_name.extracted"]] <- NULL
+      }
+
+      # Remove the source column entirely as requested - we only care about matching_method
+      # We do this for all possible variants of the source column
+      source_cols <- grep("^source(\\..+)?$", names(assets_with_events), value = TRUE)
+      if (length(source_cols) > 0) {
+        for (scol in source_cols) {
+          assets_with_events[[scol]] <- NULL
+        }
+      }
+
+      # Preserve per-indicator metadata from extraction when suffixes exist
+      # This must be OUTSIDE the loop to ensure it runs even if event_cols is empty
+      if (paste0("hazard_indicator", ".extracted") %in% names(assets_with_events)) {
+        assets_with_events$hazard_indicator <- assets_with_events[["hazard_indicator.extracted"]]
+        assets_with_events[["hazard_indicator.extracted"]] <- NULL
+      }
+      if (paste0("hazard_indicator", ".event") %in% names(assets_with_events)) {
+        assets_with_events[["hazard_indicator.event"]] <- NULL
+      }
+
+      # Backfill missing index columns (e.g., season) from inventory when absent
+      # This prevents mapping joins from failing when a required index is missing
+      index_backfill_cols <- intersect(
+        c("season", "scenario_name", "return_period", "gwl", "ensemble"),
+        names(hazards_inventory)
+      )
+      if (length(index_backfill_cols) > 0) {
+        inventory_backfill <- hazards_inventory |>
+          dplyr::select("indicator_key", dplyr::any_of(index_backfill_cols)) |>
+          dplyr::distinct(.data$indicator_key, .keep_all = TRUE)
+
+        assets_with_events <- assets_with_events |>
+          dplyr::left_join(inventory_backfill, by = "indicator_key", suffix = c("", ".inv"))
+
+        for (col in index_backfill_cols) {
+          inv_col <- paste0(col, ".inv")
+          if (inv_col %in% names(assets_with_events)) {
+            if (col %in% names(assets_with_events)) {
+              assets_with_events[[col]] <- dplyr::coalesce(assets_with_events[[col]], assets_with_events[[inv_col]])
+            } else {
+              assets_with_events[[col]] <- assets_with_events[[inv_col]]
+            }
+            assets_with_events[[inv_col]] <- NULL
+          }
+        }
+      }
+
+    # Step 2.4: Apply spatial separation (per event) before mapping/shock joins
+    .report_progress(0.50, "Applying spatial separation...")
+    spatial_eval <- evaluate_spatial_separation(
+      assets_with_events = assets_with_events,
+      events = events,
+      hazard_configs = hazard_configs,
+      spatial_separation_data = spatial_separation_data,
+      base_dir = base_dir,
+      adm1_boundaries = adm1_boundaries,
+      adm2_boundaries = adm2_boundaries
     )
 
-  included_events <- assets_with_events |>
-    dplyr::filter(.data$spatial_included)
-
-  excluded_events <- assets_with_events |>
-    dplyr::filter(!.data$spatial_included)
-
-  excluded_rows <- build_spatial_exclusion_rows(excluded_events)
-
-  # Step 2.5: Join mapping tables for hazard-specific factors (included rows only)
-  .report_progress(0.60, "Joining damage and cost factors...")
-  assets_factors_included <- if (nrow(included_events) > 0) {
-    join_damage_cost_factors(included_events, hazard_configs, hazards_dir)
-  } else {
-    tibble::tibble()
-  }
-
-  # Rows used for shocks are the included rows only.
-  assets_factors_for_shocks <- assets_factors_included
-
-  # Assets factors output includes both included rows (with factors) and excluded rows (with status).
-  # Avoid binding with empty tables to prevent class-coercion issues on complex columns.
-  assets_factors <- if (nrow(assets_factors_included) == 0 && nrow(excluded_rows) == 0) {
-    tibble::tibble()
-  } else if (nrow(excluded_rows) == 0) {
-    assets_factors_included
-  } else if (nrow(assets_factors_included) == 0) {
-    excluded_rows
-  } else {
-    dplyr::bind_rows(assets_factors_included, excluded_rows)
-  }
-
-  # Standardize output columns: keep hazard_return_period and remove long-format metadata
-  if ("return_period" %in% names(assets_factors)) {
-    if ("hazard_return_period" %in% names(assets_factors)) {
-      assets_factors$hazard_return_period <- dplyr::coalesce(
-        assets_factors$hazard_return_period,
-        assets_factors$return_period
+    assets_with_events <- assets_with_events |>
+      dplyr::left_join(spatial_eval, by = c("asset", "event_id")) |>
+      dplyr::mutate(
+        spatial_included = dplyr::coalesce(.data$spatial_included, TRUE),
+        spatial_multiplier = dplyr::coalesce(as.numeric(.data$spatial_multiplier), 1)
       )
+
+    included_events <- assets_with_events |>
+      dplyr::filter(.data$spatial_included)
+
+    excluded_events <- assets_with_events |>
+      dplyr::filter(!.data$spatial_included)
+
+    excluded_rows <- build_spatial_exclusion_rows(excluded_events)
+
+    # Step 2.5: Join mapping tables for hazard-specific factors (included rows only)
+    .report_progress(0.60, "Joining damage and cost factors...")
+    assets_factors_included <- if (nrow(included_events) > 0) {
+      join_damage_cost_factors(included_events, hazard_configs, hazards_dir)
     } else {
-      assets_factors$hazard_return_period <- assets_factors$return_period
+      tibble::tibble()
     }
-    assets_factors$return_period <- NULL
+
+    # Rows used for shocks are the included rows only.
+    assets_factors_for_shocks <- assets_factors_included
+
+    # Assets factors output includes both included rows (with factors) and excluded rows (with status).
+    # Avoid binding with empty tables to prevent class-coercion issues on complex columns.
+    assets_factors <- if (nrow(assets_factors_included) == 0 && nrow(excluded_rows) == 0) {
+      tibble::tibble()
+    } else if (nrow(excluded_rows) == 0) {
+      assets_factors_included
+    } else if (nrow(assets_factors_included) == 0) {
+      excluded_rows
+    } else {
+      dplyr::bind_rows(assets_factors_included, excluded_rows)
+    }
+
+    # Standardize output columns: keep hazard_return_period and remove long-format metadata
+    if ("return_period" %in% names(assets_factors)) {
+      if ("hazard_return_period" %in% names(assets_factors)) {
+        assets_factors$hazard_return_period <- dplyr::coalesce(
+          assets_factors$hazard_return_period,
+          assets_factors$return_period
+        )
+      } else {
+        assets_factors$hazard_return_period <- assets_factors$return_period
+      }
+      assets_factors$return_period <- NULL
+    }
+
+    # Drop long-format only columns and any suffixed columns
+    drop_cols <- c("hazard_indicator", "hazard_intensity", "source", "indicator_key", "hazard_key")
+    drop_cols <- intersect(drop_cols, names(assets_factors))
+    if (length(drop_cols) > 0) {
+      assets_factors <- assets_factors |>
+        dplyr::select(-dplyr::all_of(drop_cols))
+    }
+
+    suffix_cols <- grep("\\.(extracted|event|inv)$", names(assets_factors), value = TRUE)
+    if (length(suffix_cols) > 0) {
+      assets_factors <- assets_factors |>
+        dplyr::select(-dplyr::all_of(suffix_cols))
+    }
+  } else {
+    # Only global heat/drought events were requested: no flood/other hazard extraction is needed.
+    assets_factors_included <- tibble::tibble()
+    assets_factors_for_shocks <- tibble::tibble()
+    assets_factors <- tibble::tibble()
   }
 
-  # Drop long-format only columns and any suffixed columns
-  drop_cols <- c("hazard_indicator", "hazard_intensity", "source", "indicator_key", "hazard_key")
-  drop_cols <- intersect(drop_cols, names(assets_factors))
-  if (length(drop_cols) > 0) {
-    assets_factors <- assets_factors |>
-      dplyr::select(-dplyr::all_of(drop_cols))
+  # Step 2.6: Global heat events -- per-asset excess heat days (blended by shock
+  # year), labour-productivity exposure and the IMF-group labour elasticity. The rows
+  # carry every column the config's revenue equation needs, so they go through
+  # the unmodified shock sequence below alongside the other hazards' rows.
+  heat_warnings <- character(0)
+  if (nrow(events_heat) > 0) {
+    .report_progress(0.62, "Computing global heat exposure...")
+    heat_run <- build_global_heat_event_factors(
+      assets, events_heat, hazard_configs, hazards_dir,
+      spatial_separation_data = spatial_separation_data, base_dir = base_dir
+    )
+    heat_warnings <- heat_run$warnings
+    for (msg in heat_warnings) message(msg)
+
+    # Assets outside an event's selected regions are reported but not shocked.
+    assets_factors_for_shocks <- dplyr::bind_rows(
+      assets_factors_for_shocks,
+      heat_run$rows[heat_run$rows$spatial_included, , drop = FALSE]
+    )
+    assets_factors <- dplyr::bind_rows(assets_factors, heat_run$rows)
   }
 
-  suffix_cols <- grep("\\.(extracted|event|inv)$", names(assets_factors), value = TRUE)
-  if (length(suffix_cols) > 0) {
-    assets_factors <- assets_factors |>
-      dplyr::select(-dplyr::all_of(suffix_cols))
-  }
+  # Step 2.7: Global drought events -- per-asset SPEI-3 (season, blended by shock year),
+  # crop (input or country proxy), growing period from the crop calendar and the
+  # resulting yield-loss damage factor (agriculture assets only).
+  drought_warnings <- character(0)
+  if (nrow(events_drought) > 0) {
+    .report_progress(0.64, "Computing global drought exposure...")
+    drought_run <- build_global_drought_event_factors(
+      assets, events_drought, hazard_configs, hazards_dir,
+      spatial_separation_data = spatial_separation_data, base_dir = base_dir
+    )
+    drought_warnings <- drought_run$warnings
+    for (msg in drought_warnings) message(msg)
 
+    assets_factors_for_shocks <- dplyr::bind_rows(
+      assets_factors_for_shocks,
+      drought_run$rows[drought_run$rows$spatial_included, , drop = FALSE]
+    )
+    assets_factors <- dplyr::bind_rows(assets_factors, drought_run$rows)
+  }
 
   # ============================================================================
   # PHASE 3: SHOCK - Compute baseline and shocked yearly trajectories
@@ -524,12 +587,23 @@ compute_risk <- function(assets,
     growth_rate = growth_rate
   )
 
+  # Heat rows: revenue_adjustment = baseline revenue (event year) x output_change_pct
+  if (nrow(events_heat) > 0) {
+    assets_factors <- add_heat_revenue_adjustment(assets_factors, yearly_baseline)
+  }
+  # Drought rows: drought_revenue_adjustment = -baseline revenue (event year) x damage factor
+  if (nrow(events_drought) > 0) {
+    assets_factors <- add_drought_revenue_adjustment(
+      assets_factors, yearly_baseline, global_drought_hazard_types(hazard_configs)
+    )
+  }
+
   # Step 3.2: Compute shocked trajectories and concatenate with baseline
   # This now returns both baseline and shock scenarios in one dataframe
   yearly_shock <- compute_shock_trajectories(
     yearly_baseline_profits = yearly_baseline,
     assets_with_factors = assets_factors_for_shocks,
-    events = events,
+    events = events_all,
     hazard_configs = hazard_configs,
     companies = companies
   )
@@ -571,6 +645,12 @@ compute_risk <- function(assets,
     aggregation_method = aggregation_method
   )
 
+  if (length(heat_warnings) > 0) {
+    final_results$heat_warnings <- heat_warnings
+  }
+  if (length(drought_warnings) > 0) {
+    final_results$drought_warnings <- drought_warnings
+  }
 
   final_results
 }

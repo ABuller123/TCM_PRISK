@@ -219,6 +219,13 @@ load_hazards_events_config <- function(file_path, hazard_configs, hazards_invent
       res_row$spatial_scheme <- get_hazard_spatial_scheme(hazard_configs, hazard_type_val)
     }
 
+    # Load Events only reconstructs deterministic-style rows (it resolves a single
+    # hazard_name via lookup_hazard_entry(), which requires a specific return_period
+    # -- a probabilistic/AAL row has none). Tag accordingly regardless of what an
+    # uploaded file's calc_mode column says, so this stays true even if a
+    # previously-exported probabilistic row's file happens to be re-uploaded.
+    res_row$calc_mode <- "deterministic"
+
     return(res_row)
   })
 
